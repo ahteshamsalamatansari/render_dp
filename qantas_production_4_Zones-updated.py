@@ -30,7 +30,6 @@ import random
 import traceback
 import argparse
 import threading
-import os
 from datetime import datetime, timedelta, date
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -44,25 +43,9 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.keys import Keys
 from selenium.common.exceptions import TimeoutException
 
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except Exception:
-    pass
-
 # ══════════════════════════════════════════════════════════════════
 #  ROUTES & CREDENTIALS — Edit only this section if things change
 # ══════════════════════════════════════════════════════════════════
-
-def _env_zone(env_name, default, legacy_env_name=None):
-    """Read a Bright Data zone from env and normalize full usernames to zone names."""
-    value = os.getenv(env_name)
-    if not value and legacy_env_name:
-        value = os.getenv(legacy_env_name)
-    value = (value or default).strip()
-    if "-zone-" in value:
-        value = value.split("-zone-", 1)[1]
-    return value
 
 ROUTES = [
     ("BME", "KNX"),   # Route 1 — Standard
@@ -73,27 +56,15 @@ ROUTES = [
 
 # Each route gets its OWN zone — zero conflict guaranteed
 ROUTE_CREDENTIALS = {
-    ("BME", "KNX"): {
-        "zone": _env_zone("QANTAS_BME_KNX_ZONE", "scraping_browser2", "BRIGHTDATA_ZONE"),
-        "password": os.getenv("QANTAS_BME_KNX_PASS", os.getenv("BRIGHTDATA_PASS", "nymmsv0ffs60")),
-    },
-    ("BME", "DRW"): {
-        "zone": _env_zone("QANTAS_BME_DRW_ZONE", "qantas_1"),
-        "password": os.getenv("QANTAS_BME_DRW_PASS", "x9ck9dpthpsg"),
-    },
-    ("DRW", "KNX"): {
-        "zone": _env_zone("QANTAS_DRW_KNX_ZONE", "qantas_2"),
-        "password": os.getenv("QANTAS_DRW_KNX_PASS", "kgu154ajo3d9"),
-    },
-    ("KNX", "BME"): {
-        "zone": _env_zone("QANTAS_KNX_BME_ZONE", "qantas_3"),
-        "password": os.getenv("QANTAS_KNX_BME_PASS", "n748kj03bomt"),
-    },
+    ("BME", "KNX"): {"zone": "scraping_browser2", "password": "nymmsv0ffs60"},
+    ("BME", "DRW"): {"zone": "qantas_1",           "password": "x9ck9dpthpsg"},
+    ("DRW", "KNX"): {"zone": "qantas_2",           "password": "kgu154ajo3d9"},
+    ("KNX", "BME"): {"zone": "qantas_3",           "password": "n748kj03bomt"},
 }
 
-BRIGHTDATA_HOST     = os.getenv("BRIGHTDATA_HOST", "brd.superproxy.io")
-BRIGHTDATA_PORT     = int(os.getenv("BRIGHTDATA_PORT", "9515"))
-CUSTOMER_ID         = os.getenv("BRIGHTDATA_CUSTOMER_ID", "hl_fbc4a16a")
+BRIGHTDATA_HOST     = "brd.superproxy.io"
+BRIGHTDATA_PORT     = 9515
+CUSTOMER_ID         = "hl_fbc4a16a"
 
 AIRPORT_NAMES = {"BME": "Broome", "KNX": "Kununurra", "DRW": "Darwin"}
 AIRLINE       = "Qantas"
