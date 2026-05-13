@@ -91,9 +91,16 @@ ROUTE_CREDENTIALS = {
     },
 }
 
-BRIGHTDATA_HOST     = os.getenv("BRIGHTDATA_HOST", "brd.superproxy.io")
-BRIGHTDATA_PORT     = int(os.getenv("BRIGHTDATA_PORT", "9515"))
-CUSTOMER_ID         = os.getenv("BRIGHTDATA_CUSTOMER_ID", "hl_fbc4a16a")
+BRIGHTDATA_HOST     = os.getenv("BRIGHTDATA_HOST", "brd.superproxy.io").strip()
+BRIGHTDATA_PORT     = int(os.getenv("BRIGHTDATA_PORT", "9515").strip())
+CUSTOMER_ID         = os.getenv("BRIGHTDATA_CUSTOMER_ID", "hl_fbc4a16a").strip()
+
+# ── Debug: print resolved credentials at import time ──
+print(f"  [DEBUG] CUSTOMER_ID  = '{CUSTOMER_ID}'")
+print(f"  [DEBUG] BD_HOST:PORT = {BRIGHTDATA_HOST}:{BRIGHTDATA_PORT}")
+for _rk, _rc in ROUTE_CREDENTIALS.items():
+    print(f"  [DEBUG] Route {_rk[0]}→{_rk[1]}: zone='{_rc['zone']}' pass_len={len(_rc['password'])}")
+print()
 
 AIRPORT_NAMES = {"BME": "Broome", "KNX": "Kununurra", "DRW": "Darwin"}
 AIRLINE       = "Qantas"
@@ -131,8 +138,6 @@ def _make_user(zone, country="au"):
 
 def make_driver(route_key, country="au", max_attempts=3):
     """Connect to Bright Data — retries up to max_attempts times on connection failure."""
-    from selenium.webdriver.remote.client_config import ClientConfig
-
     creds = ROUTE_CREDENTIALS[route_key]
     zone  = creds["zone"]
     pwd   = creds["password"]
@@ -142,10 +147,11 @@ def make_driver(route_key, country="au", max_attempts=3):
     for conn_attempt in range(1, max_attempts + 1):
         user = _make_user(zone, country)
         tprint(f"  🌐 {tag} BD connect attempt {conn_attempt}/{max_attempts} — zone={zone} session={user.split('-session-')[-1]}")
+        tprint(f"  🔑 {tag} Full username: {user}")
         try:
-            server_url = f"https://{BRIGHTDATA_HOST}:{BRIGHTDATA_PORT}"
-            config     = ClientConfig(remote_server_addr=server_url, username=user, password=pwd)
-            connection = Connection(server_url, "goog", "chrome", client_config=config)
+            # Bright Data standard: embed credentials in the URL
+            sbr_url    = f"https://{user}:{pwd}@{BRIGHTDATA_HOST}:{BRIGHTDATA_PORT}"
+            connection = Connection(sbr_url, "goog", "chrome")
 
             opts = Options()
             opts.add_argument("--disable-blink-features=AutomationControlled")
