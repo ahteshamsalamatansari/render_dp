@@ -217,7 +217,9 @@ async def main():
     print("This will take some time. Progress will be printed live.")
     
     await scraper.scrape_all(routes, days=84)
-    scraper.save_to_csv("nexus_flights_final.csv")
+    stamp = datetime.now().strftime("%d-%m-%Y_%I-%M%p")
+    csv_path = OUTPUT_DIR / f"Nexus_Fare_Tracker_{stamp}.csv"
+    scraper.save_to_csv(str(csv_path))
 
 if __name__ == "__main__":
     asyncio.run(main())

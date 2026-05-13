@@ -50,7 +50,7 @@ your-repo/
 | **Name** | `flight-scraper-cron` |
 | **Environment** | `Python` |
 | **Branch** | `main` |
-| **Build Command** | `pip install -r requirements.txt && playwright install chromium` |
+| **Build Command** | `pip install -r requirements.txt && playwright install --with-deps chromium` |
 | **Command** | `python cron_runner.py` |
 | **Schedule** | `0 21 * * *` (see schedule section below) |
 
