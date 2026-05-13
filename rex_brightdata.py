@@ -36,9 +36,9 @@ BD_BROWSER_HOST = os.getenv("BD_BROWSER_HOST", "brd.superproxy.io")
 BD_BROWSER_PORT = os.getenv("BD_BROWSER_PORT", "9222")
 BD_BROWSER_USER = os.getenv(
     "BD_BROWSER_USER",
-    "brd-customer-hl_fbc4a16a-zone-scraping_browser1",
+    "brd-customer-hl_fbc4a16a-zone-scraping_browser2",
 )
-BD_BROWSER_PASS = os.getenv("BD_BROWSER_PASS", "cdyjh3mz4oib")
+BD_BROWSER_PASS = os.getenv("BD_BROWSER_PASS", "nymmsv0ffs60")
 BD_AUTH_TOKEN = os.getenv(
     "BD_AUTH_TOKEN",
     "7b1cdf1c-e4e0-4b6c-925b-0121031e6bf7",
