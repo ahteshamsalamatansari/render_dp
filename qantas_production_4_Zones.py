@@ -149,9 +149,10 @@ def make_driver(route_key, country="au", max_attempts=3):
         tprint(f"  🌐 {tag} BD connect attempt {conn_attempt}/{max_attempts} — zone={zone} session={user.split('-session-')[-1]}")
         tprint(f"  🔑 {tag} Full username: {user}")
         try:
-            # Bright Data standard: embed credentials in the URL
-            sbr_url    = f"https://{user}:{pwd}@{BRIGHTDATA_HOST}:{BRIGHTDATA_PORT}"
-            connection = Connection(sbr_url, "goog", "chrome")
+            from selenium.webdriver.remote.client_config import ClientConfig
+            server_url = f"https://{BRIGHTDATA_HOST}:{BRIGHTDATA_PORT}"
+            config     = ClientConfig(remote_server_addr=server_url, username=user, password=pwd)
+            connection = Connection(server_url, "goog", "chrome", client_config=config)
 
             opts = Options()
             opts.add_argument("--disable-blink-features=AutomationControlled")
