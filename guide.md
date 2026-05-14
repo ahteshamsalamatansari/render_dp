@@ -46,6 +46,26 @@ Each script:
 **Routes:** BME→KNX, BME→DRW, DRW→KNX, KNX→BME (run one by one)  
 **Script:** `Qantas_4Zones_Deliver_13_05_2026_FixedU.py` — 4 dedicated Brightdata zones, one per route
 
+**Environment Variables — add these in Render under Environment:**
+
+| Variable | Value |
+|----------|-------|
+| `PYTHON_VERSION` | `3.11.8` |
+| `EMAIL_FROM` | `ahteshamsalamat@gmail.com` |
+| `EMAIL_PASSWORD` | `oxar pkne tppr dtys` |
+| `EMAIL_TO` | `ahteshamansari@bizprospex.com` |
+| `BRIGHTDATA_HOST` | `brd.superproxy.io` |
+| `BRIGHTDATA_PORT` | `9515` |
+| `BRIGHTDATA_CUSTOMER_ID` | `hl_fbc4a16a` |
+| `QANTAS_BME_KNX_ZONE` | `scraping_browser2` |
+| `QANTAS_BME_KNX_PASS` | `nymmsv0ffs60` |
+| `QANTAS_BME_DRW_ZONE` | `qantas_1` |
+| `QANTAS_BME_DRW_PASS` | `x9ck9dpthpsg` |
+| `QANTAS_DRW_KNX_ZONE` | `qantas_2` |
+| `QANTAS_DRW_KNX_PASS` | `kgu154ajo3d9` |
+| `QANTAS_KNX_BME_ZONE` | `qantas_3` |
+| `QANTAS_KNX_BME_PASS` | `n748kj03bomt` |
+
 ---
 
 ### Cron 2 — Airnorth
@@ -61,6 +81,19 @@ Each script:
 
 **Routes:** BME→KNX, BME→DRW, DRW→KNX, KNX→BME  
 **Script:** `airnorth_brightdata_Main.py` — Brightdata Web Unlocker API, 16 async workers
+
+**Environment Variables — add these in Render under Environment:**
+
+| Variable | Value |
+|----------|-------|
+| `PYTHON_VERSION` | `3.11.8` |
+| `EMAIL_FROM` | `ahteshamsalamat@gmail.com` |
+| `EMAIL_PASSWORD` | `oxar pkne tppr dtys` |
+| `EMAIL_TO` | `ahteshamansari@bizprospex.com` |
+| `BRIGHTDATA_API_TOKEN` | `7b1cdf1c-e4e0-4b6c-925b-0121031e6bf7` |
+| `BRIGHTDATA_API_ZONE` | `airnorth_sc_01` |
+| `BRIGHTDATA_API_URL` | `https://api.brightdata.com/request` |
+| `BRIGHTDATA_CHECK_URL` | `https://geo.brdtest.com/welcome.txt?product=unlocker&method=api` |
 
 ---
 
@@ -78,6 +111,15 @@ Each script:
 **Routes:** PER↔GET, PER↔BME, KTA↔BME, PHE↔BME, GET↔BME (10 routes total)  
 **Script:** `scrape_nexus_final.py`
 
+**Environment Variables — add these in Render under Environment:**
+
+| Variable | Value |
+|----------|-------|
+| `PYTHON_VERSION` | `3.11.8` |
+| `EMAIL_FROM` | `ahteshamsalamat@gmail.com` |
+| `EMAIL_PASSWORD` | `oxar pkne tppr dtys` |
+| `EMAIL_TO` | `ahteshamansari@bizprospex.com` |
+
 ---
 
 ### Cron 4 — Rex Airlines
@@ -93,6 +135,19 @@ Each script:
 
 **Routes:** PER↔ALH, PER↔EPR, PER↔CVQ, PER↔MJK, CVQ↔MJK (10 routes total)  
 **Script:** `rex_brightdata.py`
+
+**Environment Variables — add these in Render under Environment:**
+
+| Variable | Value |
+|----------|-------|
+| `PYTHON_VERSION` | `3.11.8` |
+| `EMAIL_FROM` | `ahteshamsalamat@gmail.com` |
+| `EMAIL_PASSWORD` | `oxar pkne tppr dtys` |
+| `EMAIL_TO` | `ahteshamansari@bizprospex.com` |
+| `BD_BROWSER_USER` | `brd-customer-hl_fbc4a16a-zone-scraping_browser2` |
+| `BD_BROWSER_PASS` | `nymmsv0ffs60` |
+| `BD_BROWSER_HOST` | `brd.superproxy.io` |
+| `BD_BROWSER_PORT` | `9222` |
 
 ---
 
