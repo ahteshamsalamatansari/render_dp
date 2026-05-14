@@ -49,7 +49,7 @@ RETRY_ERRORS = ("Connection aborted.", "RemoteDisconnected")
 SCRAPERS = [
     {
         "name": "Qantas",
-        "command": ["python", "Qantas_4Zones_Deliver_13_05_2026_Fixed.py", "--workers", "1"],
+        "command": ["python", "Qantas_4Zones_Deliver_13_05_2026_FixedU.py", "--workers", "1"],
         "routes": [
             "BME → KNX (Broome → Kununurra)",
             "BME → DRW (Broome → Darwin)",
