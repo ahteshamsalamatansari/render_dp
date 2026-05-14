@@ -546,6 +546,13 @@ class RexScraper:
         return "not_found"
 
     async def go_next_ribbon(self, page) -> bool:
+        # Remove any jQuery UI modal overlay that intercepts pointer events
+        await page.evaluate("""
+            document.querySelectorAll('.ui-widget-overlay').forEach(el => el.remove());
+            if (typeof $ !== 'undefined') {
+                try { $('.ui-dialog').dialog('close'); } catch(e) {}
+            }
+        """)
         for sel in [
             ".calendar .arrow.next", ".ribbon-next", "button.next-week",
             "[aria-label='Next week']", ".date-nav-next",
@@ -559,7 +566,7 @@ class RexScraper:
                 cls = (await btn.get_attribute("class") or "").lower()
                 if "disabled" in cls:
                     return False
-                await btn.click()
+                await page.evaluate("el => el.click()", btn)
                 await asyncio.sleep(3)
                 return True
         return False
