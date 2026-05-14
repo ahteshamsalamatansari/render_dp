@@ -1023,9 +1023,19 @@ class RexScraper:
 
                 today = datetime.now()
                 await page.locator("#datefilter").click()
-                await page.locator(
-                    ".daterangepicker td.available:not(.off)"
-                ).filter(has_text=str(today.day)).first.click()
+                await page.locator(".daterangepicker").wait_for(state="visible", timeout=10000)
+                # JS click bypasses Playwright viewport-visibility check on the calendar cell
+                await page.evaluate(f"""
+                    const cells = document.querySelectorAll(
+                        '.daterangepicker td.available:not(.off)'
+                    );
+                    for (const cell of cells) {{
+                        if (cell.textContent.trim() === '{today.day}') {{
+                            cell.click();
+                            break;
+                        }}
+                    }}
+                """)
 
                 await page.locator(
                     "#ContentPlaceHolder1_BookingHomepageV21_SubmitBooking"
