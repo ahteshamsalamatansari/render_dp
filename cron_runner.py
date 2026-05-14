@@ -1,8 +1,8 @@
 """
 Render Cron Job Runner — Sequential Scraper + Email Report
 ==========================================================
-Runs all 4 airline scrapers one-by-one, then emails the generated
-CSV/XLSX files to the configured recipient.
+Runs all 4 airline scrapers one-by-one, emails output files after each
+airline completes (not at the end), and retries on connection errors.
 
 Usage:
     python cron_runner.py              # Run all scrapers + email
@@ -19,7 +19,8 @@ import sys
 import time
 import smtplib
 import subprocess
-from datetime import datetime, timedelta
+import threading
+from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
@@ -38,12 +39,17 @@ EMAIL_TO = os.getenv("EMAIL_TO", "ahteshamansari@bizprospex.com")
 SMTP_HOST = "smtp.gmail.com"
 SMTP_PORT = 587
 
+# Retry settings for connection errors
+MAX_RETRIES = 3
+RETRY_DELAY_S = 60
+RETRY_ERRORS = ("Connection aborted.", "RemoteDisconnected")
+
 # ── Scraper definitions ────────────────────────────────
 
 SCRAPERS = [
     {
         "name": "Qantas",
-        "command": ["python", "Qantas_4Zones_Deliver_13_05_2026_Fixed.py", "--workers", "4"],
+        "command": ["python", "Qantas_4Zones_Deliver_13_05_2026_Fixed.py", "--workers", "1"],
         "routes": [
             "BME → KNX (Broome → Kununurra)",
             "BME → DRW (Broome → Darwin)",
@@ -107,28 +113,53 @@ def log(msg: str) -> None:
     print(f"[{ts}] {msg}", flush=True)
 
 
-def collect_output_files(since_hours: float = 8.0) -> list[Path]:
-    """
-    Collect all CSV/XLSX files from output/ that were modified
-    within the last `since_hours` hours.
-    """
-    cutoff = time.time() - (since_hours * 3600)
-    files = []
+def stream_process(cmd: list, env: dict, timeout: float) -> tuple[int, str]:
+    """Run a subprocess, stream its output in real-time, and return (returncode, full_output)."""
+    output_lines: list[str] = []
 
+    proc = subprocess.Popen(
+        cmd, env=env,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, bufsize=1,
+    )
+
+    def _reader():
+        for line in proc.stdout:
+            print(line, end="", flush=True)
+            output_lines.append(line)
+
+    reader_thread = threading.Thread(target=_reader, daemon=True)
+    reader_thread.start()
+
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        reader_thread.join(timeout=5)
+        raise
+
+    reader_thread.join(timeout=5)
+    return proc.returncode, "".join(output_lines)
+
+
+def collect_output_files_since(since_ts: float) -> list[Path]:
+    """Collect CSV/XLSX files from output/ modified at or after since_ts (epoch seconds)."""
+    files = []
     if not OUTPUT_DIR.exists():
         return files
-
     for item in OUTPUT_DIR.rglob("*"):
         if item.is_file() and item.suffix.lower() in (".csv", ".xlsx"):
-            if item.stat().st_mtime >= cutoff:
+            if item.stat().st_mtime >= since_ts:
                 files.append(item)
-
     files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
     return files
 
 
+def collect_output_files(since_hours: float = 8.0) -> list[Path]:
+    return collect_output_files_since(time.time() - since_hours * 3600)
+
+
 def build_email_body(results: list[dict], files: list[Path]) -> str:
-    """Build a detailed plain-text email body with airline names and routes."""
     today = datetime.now().strftime("%A, %d %B %Y")
     lines = [
         f"Flight Scraper Daily Report — {today}",
@@ -136,7 +167,6 @@ def build_email_body(results: list[dict], files: list[Path]) -> str:
         "",
     ]
 
-    # Per-scraper summary
     for r in results:
         status_icon = "✅" if r["success"] else "❌"
         lines.append(f"{status_icon}  {r['name']}")
@@ -147,14 +177,12 @@ def build_email_body(results: list[dict], files: list[Path]) -> str:
             lines.append(f"      • {route}")
         lines.append("")
 
-    # Attached files
     lines.append("-" * 55)
     if files:
         lines.append(f"📎 Attached files ({len(files)}):")
         for f in files:
             size_kb = f.stat().st_size / 1024
             mtime = datetime.fromtimestamp(f.stat().st_mtime).strftime("%H:%M:%S")
-            # Show relative path from output/
             rel = f.relative_to(OUTPUT_DIR) if str(f).startswith(str(OUTPUT_DIR)) else f.name
             lines.append(f"  • {rel}  ({size_kb:.1f} KB, {mtime})")
     else:
@@ -162,7 +190,6 @@ def build_email_body(results: list[dict], files: list[Path]) -> str:
 
     lines.append("")
     lines.append("-" * 55)
-
     total_ok = sum(1 for r in results if r["success"])
     total = len(results)
     lines.append(f"Summary: {total_ok}/{total} scrapers completed successfully.")
@@ -172,14 +199,11 @@ def build_email_body(results: list[dict], files: list[Path]) -> str:
 
 
 def send_email(results: list[dict], files: list[Path]) -> None:
-    """Send email with all output files attached."""
     if not EMAIL_PASSWORD:
         log("⚠️  EMAIL_PASSWORD not set — skipping email.")
         return
 
     today = datetime.now().strftime("%Y-%m-%d")
-
-    # Build subject with airline names
     airline_names = ", ".join(r["name"] for r in results)
     total_ok = sum(1 for r in results if r["success"])
     total = len(results)
@@ -193,14 +217,12 @@ def send_email(results: list[dict], files: list[Path]) -> None:
     msg["Subject"] = subject
     msg.attach(MIMEText(body, "plain", "utf-8"))
 
-    # Attach files
     for filepath in files:
         try:
             with open(filepath, "rb") as f:
                 part = MIMEBase("application", "octet-stream")
                 part.set_payload(f.read())
             encoders.encode_base64(part)
-            # Use relative path for filename so Airnorth subdirs are clear
             rel = filepath.relative_to(OUTPUT_DIR) if str(filepath).startswith(str(OUTPUT_DIR)) else filepath.name
             safe_name = str(rel).replace("\\", "/").replace("/", "_")
             part.add_header("Content-Disposition", f"attachment; filename=\"{safe_name}\"")
@@ -208,7 +230,6 @@ def send_email(results: list[dict], files: list[Path]) -> None:
         except Exception as e:
             log(f"⚠️  Could not attach {filepath}: {e}")
 
-    # Send
     log(f"📧 Sending email to {EMAIL_TO} ({len(files)} attachments)...")
     try:
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
@@ -225,7 +246,7 @@ def send_email(results: list[dict], files: list[Path]) -> None:
 # ── Main runner ─────────────────────────────────────────
 
 def run_all_scrapers() -> list[dict]:
-    """Run each scraper sequentially and collect results."""
+    """Run each scraper sequentially, retry on connection errors, email after each."""
     results = []
 
     for scraper in SCRAPERS:
@@ -241,64 +262,76 @@ def run_all_scrapers() -> list[dict]:
             log(f"     • {route}")
         log("")
 
-        start = time.time()
-        try:
-            env = os.environ.copy()
-            env["PYTHONUNBUFFERED"] = "1"
-            env["TZ"] = "Australia/Perth"
+        scraper_start = time.time()
+        success = False
+        exit_code = -1
+        duration = "0s"
 
-            proc = subprocess.run(
-                cmd,
-                env=env,
-                timeout=14400,  # 4-hour max per scraper
-            )
+        for attempt in range(1, MAX_RETRIES + 1):
+            if attempt > 1:
+                log(f"⟳  [{name}] Retry {attempt}/{MAX_RETRIES} — waiting {RETRY_DELAY_S}s before next attempt...")
+                time.sleep(RETRY_DELAY_S)
 
-            elapsed = time.time() - start
-            duration = format_duration(elapsed)
-            success = proc.returncode == 0
+            try:
+                env = os.environ.copy()
+                env["PYTHONUNBUFFERED"] = "1"
+                env["TZ"] = "Australia/Perth"
 
-            if success:
-                log(f"✅ {name} completed in {duration}")
-            else:
-                log(f"❌ {name} failed (exit code {proc.returncode}) after {duration}")
+                returncode, output = stream_process(cmd, env, timeout=14400)
+                elapsed = time.time() - scraper_start
+                duration = format_duration(elapsed)
+                exit_code = returncode
+                success = returncode == 0
 
-            results.append({
-                "name": name,
-                "success": success,
-                "exit_code": proc.returncode,
-                "duration": duration,
-                "routes": routes,
-            })
+                if success:
+                    log(f"✅ {name} completed in {duration}")
+                    break
 
-        except subprocess.TimeoutExpired:
-            elapsed = time.time() - start
-            duration = format_duration(elapsed)
-            log(f"⏰ {name} timed out after {duration}")
-            results.append({
-                "name": name,
-                "success": False,
-                "exit_code": -1,
-                "duration": duration,
-                "routes": routes,
-            })
+                log(f"❌ {name} failed (exit code {returncode}) after {duration}")
 
-        except Exception as e:
-            elapsed = time.time() - start
-            duration = format_duration(elapsed)
-            log(f"💥 {name} crashed: {e}")
-            results.append({
-                "name": name,
-                "success": False,
-                "exit_code": -1,
-                "duration": duration,
-                "routes": routes,
-            })
+                if any(err in output for err in RETRY_ERRORS):
+                    log(f"   ↳ Connection error detected — will retry.")
+                    if attempt < MAX_RETRIES:
+                        continue
+                # Non-connection failure or out of retries — stop
+                break
+
+            except subprocess.TimeoutExpired:
+                elapsed = time.time() - scraper_start
+                duration = format_duration(elapsed)
+                log(f"⏰ {name} timed out after {duration}")
+                exit_code = -1
+                success = False
+                break
+
+            except Exception as e:
+                elapsed = time.time() - scraper_start
+                duration = format_duration(elapsed)
+                log(f"💥 {name} crashed: {e}")
+                exit_code = -1
+                success = False
+                break
+
+        result = {
+            "name": name,
+            "success": success,
+            "exit_code": exit_code,
+            "duration": duration,
+            "routes": routes,
+        }
+        results.append(result)
+
+        # Email immediately after this airline finishes
+        files = collect_output_files_since(scraper_start)
+        log(f"\n📁 Found {len(files)} output file(s) for {name}.")
+        for f in files:
+            log(f"   • {f}")
+        send_email([result], files)
 
     return results
 
 
 def format_duration(seconds: float) -> str:
-    """Format seconds into a human-readable string."""
     h = int(seconds // 3600)
     m = int((seconds % 3600) // 60)
     s = int(seconds % 60)
@@ -312,7 +345,7 @@ def format_duration(seconds: float) -> str:
 def main():
     import argparse
 
-    parser = argparse.ArgumentParser(description="Cron runner: sequential scrapers + email")
+    parser = argparse.ArgumentParser(description="Cron runner: sequential scrapers + email per airline")
     parser.add_argument(
         "--dry-run", action="store_true",
         help="Skip scrapers — just collect existing output files and send email",
@@ -329,7 +362,8 @@ def main():
     log("")
 
     if args.dry_run:
-        log("🔸 Dry run — skipping scrapers.")
+        log("🔸 Dry run — skipping scrapers, emailing existing files.")
+        files = collect_output_files(since_hours=8.0)
         results = [
             {
                 "name": s["name"],
@@ -340,17 +374,12 @@ def main():
             }
             for s in SCRAPERS
         ]
+        log(f"\n📁 Found {len(files)} output file(s) from the last 8 hours.")
+        for f in files:
+            log(f"   • {f}")
+        send_email(results, files)
     else:
         results = run_all_scrapers()
-
-    # Collect output files
-    files = collect_output_files(since_hours=8.0)
-    log(f"\n📁 Found {len(files)} output file(s) from the last 8 hours.")
-    for f in files:
-        log(f"   • {f}")
-
-    # Send email
-    send_email(results, files)
 
     # Final summary
     log("")
@@ -360,7 +389,6 @@ def main():
     log(f"🏁 Done — {total_ok}/{total} scrapers completed successfully.")
     log("=" * 55)
 
-    # Exit with error if any scraper failed (so Render marks the cron run as failed)
     if total_ok < total:
         sys.exit(1)
 
