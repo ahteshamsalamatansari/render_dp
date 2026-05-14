@@ -147,8 +147,8 @@ Each script:
 | `EMAIL_FROM` | `ahteshamsalamat@gmail.com` |
 | `EMAIL_PASSWORD` | `oxar pkne tppr dtys` |
 | `EMAIL_TO` | `ahteshamansari@bizprospex.com` |
-| `BD_BROWSER_USER` | `brd-customer-hl_fbc4a16a-zone-scraping_browser2` |
-| `BD_BROWSER_PASS` | `nymmsv0ffs60` |
+| `BD_BROWSER_USER` | `brd-customer-hl_fbc4a16a-zone-cont_rex` |
+| `BD_BROWSER_PASS` | `072res2p22t3` |
 | `BD_BROWSER_HOST` | `brd.superproxy.io` |
 | `BD_BROWSER_PORT` | `9222` |
 
@@ -222,10 +222,10 @@ All 4 crons share the same email and Python vars. Airnorth has its own Brightdat
 
 ### Rex — Brightdata Browser API
 
-These are baked into `rex_brightdata.py`. Only add them if you need to override:
-
 | Variable | Value |
 |----------|-------|
+| `BD_BROWSER_USER` | `brd-customer-hl_fbc4a16a-zone-cont_rex` |
+| `BD_BROWSER_PASS` | `072res2p22t3` |
 | `BD_BROWSER_HOST` | `brd.superproxy.io` |
 | `BD_BROWSER_PORT` | `9222` |
 
