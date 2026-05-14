@@ -104,7 +104,7 @@ Each script:
 | Name | `cron-nexus` |
 | Branch | `cron/nexus` |
 | Runtime | `Python` |
-| Build Command | `pip install -r requirements.txt` |
+| Build Command | `pip install -r requirements.txt && playwright install --with-deps chromium` |
 | Start Command | `python cron_nexus.py` |
 | Schedule | *(set per timezone table below)* |
 
