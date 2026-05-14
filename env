@@ -1,0 +1,15 @@
+# Brightdata Web Unlocker API
+BRIGHTDATA_API_TOKEN=7b1cdf1c-e4e0-4b6c-925b-0121031e6bf7
+BRIGHTDATA_API_ZONE=airnorth_sc_01
+BRIGHTDATA_API_URL=https://api.brightdata.com/request
+BRIGHTDATA_CHECK_URL=https://geo.brdtest.com/welcome.txt?product=unlocker&method=api
+
+# Brightdata Browser API
+BRIGHTDATA_BROWSER_WS=wss://brd-customer-hl_898624f2-zone-scraping_browser1:fgu8f264izpx@brd.superproxy.io:9222
+BRIGHTDATA_BROWSER_SELENIUM=https://brd-customer-hl_898624f2-zone-scraping_browser1:fgu8f264izpx@brd.superproxy.io:9515
+BRIGHTDATA_BROWSER_CUSTOMER_ID=hl_898624f2
+BRIGHTDATA_BROWSER_ZONE=scraping_browser1
+BRIGHTDATA_BROWSER_PASSWORD=fgu8f264izpx
+BRIGHTDATA_BROWSER_HOST=brd.superproxy.io
+BRIGHTDATA_BROWSER_WS_PORT=9222
+BRIGHTDATA_BROWSER_SELENIUM_PORT=9515

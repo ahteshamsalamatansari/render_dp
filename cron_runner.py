@@ -43,7 +43,7 @@ SMTP_PORT = 587
 SCRAPERS = [
     {
         "name": "Qantas",
-        "command": ["python", "qantas_production_4_Zones.py", "--workers", "1"],
+        "command": ["python", "Qantas_4Zones_Deliver_13_05_2026_Fixed.py", "--workers", "4"],
         "routes": [
             "BME → KNX (Broome → Kununurra)",
             "BME → DRW (Broome → Darwin)",
@@ -53,7 +53,7 @@ SCRAPERS = [
     },
     {
         "name": "Airnorth",
-        "command": ["python", "airnorth_fast_async.py", "--all", "--workers", "1"],
+        "command": ["python", "airnorth_brightdata_Main.py", "--all", "--workers", "1"],
         "routes": [
             "BME → KNX (Broome → Kununurra)",
             "BME → DRW (Broome → Darwin)",
