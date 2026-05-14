@@ -357,9 +357,15 @@ class RexScraper:
     async def wait_for_brightdata_captcha(self, page, detect_timeout: int = 60000):
         try:
             client = await page.context.new_cdp_session(page)
-            await client.send("Captcha.waitForSolve", {"detectTimeout": detect_timeout})
+            await asyncio.wait_for(
+                client.send("Captcha.waitForSolve", {"detectTimeout": detect_timeout}),
+                timeout=120,  # hard cap: 2 min max regardless of detect_timeout
+            )
             print("   ✅ Bright Data captcha solve step completed")
             return True
+        except asyncio.TimeoutError:
+            print("   ⚠️  CAPTCHA solve timed out after 120s — continuing anyway")
+            return False
         except Exception:
             return False
 
