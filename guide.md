@@ -119,6 +119,9 @@ Each script:
 | `EMAIL_FROM` | `ahteshamsalamat@gmail.com` |
 | `EMAIL_PASSWORD` | `oxar pkne tppr dtys` |
 | `EMAIL_TO` | `ahteshamansari@bizprospex.com` |
+| `PLAYWRIGHT_BROWSERS_PATH` | `/opt/render/project/src` |
+
+> `PLAYWRIGHT_BROWSERS_PATH` tells Playwright to install and look for Chromium inside the project folder, which Render persists between build and runtime. Without it, browsers go into `~/.cache` which is wiped after each build.
 
 ---
 
