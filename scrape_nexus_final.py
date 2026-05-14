@@ -50,7 +50,15 @@ class NexusScraper:
         total = max(1, len(routes) * days)
         completed = 0
         async with Stealth().use_async(async_playwright()) as p:
-            browser = await p.chromium.launch(headless=self.headless)
+            browser = await p.chromium.launch(
+                headless=self.headless,
+                args=[
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                ],
+            )
             context = await browser.new_context()
             page = await context.new_page()
             page.on("response", self.handle_response)
