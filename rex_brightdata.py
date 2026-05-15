@@ -160,7 +160,8 @@ def today_dt() -> datetime:
 
 
 def build_date_list() -> list[datetime]:
-    t = today_dt()
+    # Rex doesn't allow same-day booking — ribbon never shows today, start tomorrow
+    t = today_dt() + timedelta(days=1)
     return [t + timedelta(days=i) for i in range(TOTAL_DAYS)]
 
 
