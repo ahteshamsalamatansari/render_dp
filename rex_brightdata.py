@@ -519,7 +519,10 @@ class RexScraper:
             if not tabs:
                 continue
             for tab in tabs:
-                raw = (await tab.inner_text()).strip().replace("\n", " ")
+                try:
+                    raw = (await tab.inner_text(timeout=3000)).strip().replace("\n", " ")
+                except Exception:
+                    continue
                 tab_dt = self.parse_tab_date(raw)
                 if not tab_dt or tab_dt.date() != target_dt.date():
                     continue
@@ -604,7 +607,10 @@ class RexScraper:
                     cards = await page.query_selector_all(sel)
                     if cards:
                         for card in cards[:3]:
-                            txt = (await card.inner_text()).strip()
+                            try:
+                                txt = (await card.inner_text(timeout=3000)).strip()
+                            except Exception:
+                                continue
                             if re.search(r'ZL\s?\d{3,4}', txt):
                                 flights_ok = True
                                 break
@@ -612,9 +618,12 @@ class RexScraper:
                         break
 
                 if not flights_ok:
-                    body_snippet = await page.inner_text("body")
-                    if re.search(r'ZL\s?\d{3,4}', body_snippet[:5000]):
-                        flights_ok = True
+                    try:
+                        body_snippet = await page.inner_text("body", timeout=5000)
+                        if re.search(r'ZL\s?\d{3,4}', body_snippet[:5000]):
+                            flights_ok = True
+                    except Exception:
+                        pass
 
             if date_ok and flights_ok:
                 print(f"   ✅ Page loaded — date synced + flights visible")
@@ -645,7 +654,10 @@ class RexScraper:
             print(f"   🔍 Card selector '{sel}' → {len(rows)} row(s)")
 
             for row in rows:
-                text  = (await row.inner_text()).strip()
+                try:
+                    text = (await row.inner_text(timeout=5000)).strip()
+                except Exception:
+                    continue
                 flat  = text.replace("\n", " ")
 
                 # Build ZL→time mapping for this card in one pass
@@ -669,7 +681,10 @@ class RexScraper:
 
         # ── STEP 2: Body text scan (fallback) ─────────────────
         print("   ⚠️ No card selector matched — body text scan (ribbon-aware).")
-        full_body = await page.inner_text("body")
+        try:
+            full_body = await page.inner_text("body", timeout=8000)
+        except Exception:
+            return data
 
         ribbon_end = find_ribbon_end_position(full_body)
         print(f"   📍 Ribbon area ends at ~char {ribbon_end}")
