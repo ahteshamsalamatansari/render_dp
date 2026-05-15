@@ -151,6 +151,9 @@ Each script:
 | `BD_BROWSER_PASS` | `072res2p22t3` |
 | `BD_BROWSER_HOST` | `brd.superproxy.io` |
 | `BD_BROWSER_PORT` | `9222` |
+| `BD_AUTH_TOKEN` | `7b1cdf1c-e4e0-4b6c-925b-0121031e6bf7` |
+| `BD_WEB_UNLOCKER_ZONE` | `unblocker1` |
+| `BD_UNLOCKER_ENDPOINT` | `https://api.brightdata.com/request` |
 
 ---
 
@@ -220,7 +223,7 @@ All 4 crons share the same email and Python vars. Airnorth has its own Brightdat
 
 ---
 
-### Rex — Brightdata Browser API
+### Rex — Brightdata Browser API + Web Unlocker API
 
 | Variable | Value |
 |----------|-------|
@@ -228,6 +231,9 @@ All 4 crons share the same email and Python vars. Airnorth has its own Brightdat
 | `BD_BROWSER_PASS` | `072res2p22t3` |
 | `BD_BROWSER_HOST` | `brd.superproxy.io` |
 | `BD_BROWSER_PORT` | `9222` |
+| `BD_AUTH_TOKEN` | `7b1cdf1c-e4e0-4b6c-925b-0121031e6bf7` |
+| `BD_WEB_UNLOCKER_ZONE` | `unblocker1` |
+| `BD_UNLOCKER_ENDPOINT` | `https://api.brightdata.com/request` |
 
 ---
 
