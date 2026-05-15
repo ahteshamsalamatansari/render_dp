@@ -150,12 +150,13 @@ FLIGHT_LIST_SELECTORS = [
 # ─────────────────────────────────────────────────────────────
 
 def today_dt() -> datetime:
-    try:
-        from zoneinfo import ZoneInfo
-        return datetime.now(ZoneInfo('Australia/Perth')).replace(
-            hour=0, minute=0, second=0, microsecond=0, tzinfo=None)
-    except Exception:
-        return datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    # Perth = UTC+8, no DST — use fixed offset so this never fails on servers
+    # without tzdata installed (ZoneInfo('Australia/Perth') silently falls back
+    # to UTC on Render, causing the scraper to start from yesterday's date)
+    from datetime import timezone, timedelta
+    awst = timezone(timedelta(hours=8))
+    return datetime.now(awst).replace(
+        hour=0, minute=0, second=0, microsecond=0, tzinfo=None)
 
 
 def build_date_list() -> list[datetime]:
@@ -357,9 +358,15 @@ class RexScraper:
     async def wait_for_brightdata_captcha(self, page, detect_timeout: int = 60000):
         try:
             client = await page.context.new_cdp_session(page)
-            await client.send("Captcha.waitForSolve", {"detectTimeout": detect_timeout})
+            await asyncio.wait_for(
+                client.send("Captcha.waitForSolve", {"detectTimeout": detect_timeout}),
+                timeout=120,  # hard cap: 2 min max regardless of detect_timeout
+            )
             print("   ✅ Bright Data captcha solve step completed")
             return True
+        except asyncio.TimeoutError:
+            print("   ⚠️  CAPTCHA solve timed out after 120s — continuing anyway")
+            return False
         except Exception:
             return False
 
@@ -513,7 +520,10 @@ class RexScraper:
             if not tabs:
                 continue
             for tab in tabs:
-                raw = (await tab.inner_text()).strip().replace("\n", " ")
+                try:
+                    raw = (await tab.inner_text(timeout=3000)).strip().replace("\n", " ")
+                except Exception:
+                    continue
                 tab_dt = self.parse_tab_date(raw)
                 if not tab_dt or tab_dt.date() != target_dt.date():
                     continue
@@ -546,6 +556,13 @@ class RexScraper:
         return "not_found"
 
     async def go_next_ribbon(self, page) -> bool:
+        # Remove any jQuery UI modal overlay that intercepts pointer events
+        await page.evaluate("""
+            document.querySelectorAll('.ui-widget-overlay').forEach(el => el.remove());
+            if (typeof $ !== 'undefined') {
+                try { $('.ui-dialog').dialog('close'); } catch(e) {}
+            }
+        """)
         for sel in [
             ".calendar .arrow.next", ".ribbon-next", "button.next-week",
             "[aria-label='Next week']", ".date-nav-next",
@@ -559,7 +576,7 @@ class RexScraper:
                 cls = (await btn.get_attribute("class") or "").lower()
                 if "disabled" in cls:
                     return False
-                await btn.click()
+                await page.evaluate("el => el.click()", btn)
                 await asyncio.sleep(3)
                 return True
         return False
@@ -591,7 +608,10 @@ class RexScraper:
                     cards = await page.query_selector_all(sel)
                     if cards:
                         for card in cards[:3]:
-                            txt = (await card.inner_text()).strip()
+                            try:
+                                txt = (await card.inner_text(timeout=3000)).strip()
+                            except Exception:
+                                continue
                             if re.search(r'ZL\s?\d{3,4}', txt):
                                 flights_ok = True
                                 break
@@ -599,9 +619,12 @@ class RexScraper:
                         break
 
                 if not flights_ok:
-                    body_snippet = await page.inner_text("body")
-                    if re.search(r'ZL\s?\d{3,4}', body_snippet[:5000]):
-                        flights_ok = True
+                    try:
+                        body_snippet = await page.inner_text("body", timeout=5000)
+                        if re.search(r'ZL\s?\d{3,4}', body_snippet[:5000]):
+                            flights_ok = True
+                    except Exception:
+                        pass
 
             if date_ok and flights_ok:
                 print(f"   ✅ Page loaded — date synced + flights visible")
@@ -632,7 +655,10 @@ class RexScraper:
             print(f"   🔍 Card selector '{sel}' → {len(rows)} row(s)")
 
             for row in rows:
-                text  = (await row.inner_text()).strip()
+                try:
+                    text = (await row.inner_text(timeout=5000)).strip()
+                except Exception:
+                    continue
                 flat  = text.replace("\n", " ")
 
                 # Build ZL→time mapping for this card in one pass
@@ -656,7 +682,10 @@ class RexScraper:
 
         # ── STEP 2: Body text scan (fallback) ─────────────────
         print("   ⚠️ No card selector matched — body text scan (ribbon-aware).")
-        full_body = await page.inner_text("body")
+        try:
+            full_body = await page.inner_text("body", timeout=8000)
+        except Exception:
+            return data
 
         ribbon_end = find_ribbon_end_position(full_body)
         print(f"   📍 Ribbon area ends at ~char {ribbon_end}")
@@ -1023,9 +1052,19 @@ class RexScraper:
 
                 today = datetime.now()
                 await page.locator("#datefilter").click()
-                await page.locator(
-                    ".daterangepicker td.available:not(.off)"
-                ).filter(has_text=str(today.day)).first.click()
+                await page.locator(".daterangepicker").wait_for(state="visible", timeout=10000)
+                # JS click bypasses Playwright viewport-visibility check on the calendar cell
+                await page.evaluate(f"""
+                    const cells = document.querySelectorAll(
+                        '.daterangepicker td.available:not(.off)'
+                    );
+                    for (const cell of cells) {{
+                        if (cell.textContent.trim() === '{today.day}') {{
+                            cell.click();
+                            break;
+                        }}
+                    }}
+                """)
 
                 await page.locator(
                     "#ContentPlaceHolder1_BookingHomepageV21_SubmitBooking"
