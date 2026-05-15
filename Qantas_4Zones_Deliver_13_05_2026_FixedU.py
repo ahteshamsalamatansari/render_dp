@@ -23,6 +23,7 @@ Usage:
   python qantas_production_final.py --route 2        # Only BME→DRW
 """
 
+import os
 import time
 import sys
 import re
@@ -55,16 +56,17 @@ ROUTES = [
 ]
 
 # Each route gets its OWN zone — zero conflict guaranteed
+# Credentials are read from env vars so cron_qantas.py can inject alternate creds on retry
 ROUTE_CREDENTIALS = {
-    ("BME", "KNX"): {"zone": "scraping_browser2", "password": "nymmsv0ffs60"},
-    ("BME", "DRW"): {"zone": "qantas_1",           "password": "x9ck9dpthpsg"},
-    ("DRW", "KNX"): {"zone": "qantas_2",           "password": "kgu154ajo3d9"},
-    ("KNX", "BME"): {"zone": "qantas_3",           "password": "n748kj03bomt"},
+    ("BME", "KNX"): {"zone": os.getenv("QANTAS_BME_KNX_ZONE", "scraping_browser2"), "password": os.getenv("QANTAS_BME_KNX_PASS", "nymmsv0ffs60")},
+    ("BME", "DRW"): {"zone": os.getenv("QANTAS_BME_DRW_ZONE", "qantas_1"),           "password": os.getenv("QANTAS_BME_DRW_PASS", "x9ck9dpthpsg")},
+    ("DRW", "KNX"): {"zone": os.getenv("QANTAS_DRW_KNX_ZONE", "qantas_2"),           "password": os.getenv("QANTAS_DRW_KNX_PASS", "kgu154ajo3d9")},
+    ("KNX", "BME"): {"zone": os.getenv("QANTAS_KNX_BME_ZONE", "qantas_3"),           "password": os.getenv("QANTAS_KNX_BME_PASS", "n748kj03bomt")},
 }
 
-BRIGHTDATA_HOST     = "brd.superproxy.io"
-BRIGHTDATA_PORT     = 9515
-CUSTOMER_ID         = "hl_fbc4a16a"
+BRIGHTDATA_HOST     = os.getenv("BRIGHTDATA_HOST", "brd.superproxy.io")
+BRIGHTDATA_PORT     = int(os.getenv("BRIGHTDATA_PORT", "9515"))
+CUSTOMER_ID         = os.getenv("BRIGHTDATA_CUSTOMER_ID", "hl_fbc4a16a")
 
 AIRPORT_NAMES = {"BME": "Broome", "KNX": "Kununurra", "DRW": "Darwin"}
 AIRLINE       = "Qantas"
