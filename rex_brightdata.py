@@ -150,12 +150,13 @@ FLIGHT_LIST_SELECTORS = [
 # ─────────────────────────────────────────────────────────────
 
 def today_dt() -> datetime:
-    try:
-        from zoneinfo import ZoneInfo
-        return datetime.now(ZoneInfo('Australia/Perth')).replace(
-            hour=0, minute=0, second=0, microsecond=0, tzinfo=None)
-    except Exception:
-        return datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    # Perth = UTC+8, no DST — use fixed offset so this never fails on servers
+    # without tzdata installed (ZoneInfo('Australia/Perth') silently falls back
+    # to UTC on Render, causing the scraper to start from yesterday's date)
+    from datetime import timezone, timedelta
+    awst = timezone(timedelta(hours=8))
+    return datetime.now(awst).replace(
+        hour=0, minute=0, second=0, microsecond=0, tzinfo=None)
 
 
 def build_date_list() -> list[datetime]:
