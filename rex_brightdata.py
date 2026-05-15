@@ -771,12 +771,12 @@ class RexScraper:
 # ─────────────────────────────────────────────────────────────
 
 def main():
+    global OUTPUT_EXCEL
     parser = argparse.ArgumentParser(description="Rex Airlines Scraper (Brightdata)")
     parser.add_argument("--skip-unblocker-check", action="store_true")
     parser.add_argument("--output", default=OUTPUT_EXCEL)
     args = parser.parse_args()
 
-    global OUTPUT_EXCEL
     OUTPUT_EXCEL = args.output
     Path(OUTPUT_EXCEL).parent.mkdir(parents=True, exist_ok=True)
 
