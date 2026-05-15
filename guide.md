@@ -66,6 +66,21 @@ Each script:
 | `QANTAS_KNX_BME_ZONE` | `qantas_3` |
 | `QANTAS_KNX_BME_PASS` | `n748kj03bomt` |
 
+**Alternate credentials (optional — used automatically to retry any failed route):**
+
+| Variable | Value |
+|----------|-------|
+| `QANTAS_ALT_BME_KNX_ZONE` | *(alternate zone name)* |
+| `QANTAS_ALT_BME_KNX_PASS` | *(alternate zone password)* |
+| `QANTAS_ALT_BME_DRW_ZONE` | *(alternate zone name)* |
+| `QANTAS_ALT_BME_DRW_PASS` | *(alternate zone password)* |
+| `QANTAS_ALT_DRW_KNX_ZONE` | *(alternate zone name)* |
+| `QANTAS_ALT_DRW_KNX_PASS` | *(alternate zone password)* |
+| `QANTAS_ALT_KNX_BME_ZONE` | *(alternate zone name)* |
+| `QANTAS_ALT_KNX_BME_PASS` | *(alternate zone password)* |
+
+> If a route fails or stalls for 5 minutes, the cron moves to the next route. After all 4 routes finish, any failed routes are retried once using the `QANTAS_ALT_*` credentials. Leave these unset to skip the retry.
+
 ---
 
 ### Cron 2 — Airnorth
@@ -209,6 +224,19 @@ All 4 crons share the same email and Python vars. Airnorth has its own Brightdat
 | `QANTAS_DRW_KNX_PASS` | `kgu154ajo3d9` |
 | `QANTAS_KNX_BME_ZONE` | `qantas_3` |
 | `QANTAS_KNX_BME_PASS` | `n748kj03bomt` |
+
+**Alternate credentials (optional — for auto-retry on route failure):**
+
+| Variable | Value |
+|----------|-------|
+| `QANTAS_ALT_BME_KNX_ZONE` | *(alternate zone name)* |
+| `QANTAS_ALT_BME_KNX_PASS` | *(alternate zone password)* |
+| `QANTAS_ALT_BME_DRW_ZONE` | *(alternate zone name)* |
+| `QANTAS_ALT_BME_DRW_PASS` | *(alternate zone password)* |
+| `QANTAS_ALT_DRW_KNX_ZONE` | *(alternate zone name)* |
+| `QANTAS_ALT_DRW_KNX_PASS` | *(alternate zone password)* |
+| `QANTAS_ALT_KNX_BME_ZONE` | *(alternate zone name)* |
+| `QANTAS_ALT_KNX_BME_PASS` | *(alternate zone password)* |
 
 ---
 
