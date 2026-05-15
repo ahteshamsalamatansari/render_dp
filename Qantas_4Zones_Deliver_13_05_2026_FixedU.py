@@ -892,35 +892,54 @@ def do_search(driver, wait, origin, dest, start_date, attempt=1):
         target_day = str(start_date.day)
         target_iso = start_date.strftime("%Y-%m-%d")
 
-        date_clicked = driver.execute_script(f"""
-            let tds = Array.from(document.querySelectorAll('td, [role="gridcell"], [class*="day"]'));
-            let hit = tds.find(el => {{
-                let txt = (el.innerText || el.textContent || '').trim();
-                return txt === '{target_day}' && el.offsetParent !== null;
-            }});
-            if (hit) {{ hit.click(); return 'clicked td day: {target_day}'; }}
-            let formats = [
-                "{start_date.strftime('%A, %d %B %Y')}",
-                "{start_date.strftime('%d %B %Y')}",
-                "{target_iso}",
-            ];
-            for (let fmt of formats) {{
-                let el = document.querySelector('[aria-label="' + fmt + '"]');
-                if (el) {{ el.click(); return 'aria-label: ' + fmt; }}
-            }}
-            return 'no click needed - date pre-selected';
-        """)
+        # Try aria-label first — these trigger React's synthetic event properly.
+        # JS td.click() updates the visual calendar but not React state, so the
+        # form still sees no date and refuses to navigate on submit.
+        date_clicked = None
+        for fmt_label in [
+            start_date.strftime('%A, %d %B %Y'),
+            start_date.strftime('%d %B %Y'),
+            target_iso,
+        ]:
+            try:
+                el = driver.find_element(By.CSS_SELECTOR, f'[aria-label="{fmt_label}"]')
+                if el.is_displayed():
+                    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
+                    el.click()
+                    date_clicked = f"aria-label: {fmt_label}"
+                    break
+            except Exception:
+                pass
+
+        if not date_clicked:
+            # Fallback: td text match via JS
+            date_clicked = driver.execute_script(f"""
+                let tds = Array.from(document.querySelectorAll('td, [role="gridcell"], [class*="day"]'));
+                let hit = tds.find(el => {{
+                    let txt = (el.innerText || el.textContent || '').trim();
+                    return txt === '{target_day}' && el.offsetParent !== null;
+                }});
+                if (hit) {{ hit.click(); return 'clicked td day: {target_day}'; }}
+                return 'no click needed - date pre-selected';
+            """)
+
         tprint(f"    📅 {tag} Date step: {date_clicked}")
         time.sleep(2)
 
-        cont_clicked = driver.execute_script("""
+        # Confirm date picker — Qantas may show a Done/Select/Continue/Apply button
+        confirmed = driver.execute_script("""
+            let labels = ['done', 'select', 'continue', 'apply', 'confirm'];
             let btns = Array.from(document.querySelectorAll('button'));
-            let cont = btns.find(b => (b.innerText||'').trim().toLowerCase() === 'continue');
-            if (cont) { cont.click(); return true; }
-            return false;
+            let conf = btns.find(b => {
+                let txt = (b.innerText||'').trim().toLowerCase();
+                return labels.some(l => txt === l) && b.offsetParent !== null;
+            });
+            if (conf) { conf.click(); return conf.innerText.trim(); }
+            return null;
         """)
-        if cont_clicked:
-            time.sleep(3)
+        if confirmed:
+            tprint(f"    ✅ {tag} Date confirmed via '{confirmed}' button")
+            time.sleep(2)
 
         # Search button
         search_selectors = [
@@ -971,7 +990,16 @@ def do_search(driver, wait, origin, dest, start_date, attempt=1):
         else:
             driver.execute_script("arguments[0].scrollIntoView({block:'center'});", sb)
             time.sleep(1)
-            driver.execute_script("arguments[0].click();", sb)
+            # Native click fires React's synthetic event; JS click bypasses it and
+            # the form sees no date set → stays on homepage
+            try:
+                sb.click()
+            except Exception:
+                # Remote driver occasionally raises on .click() — fall back to Enter key
+                try:
+                    sb.send_keys(Keys.RETURN)
+                except Exception:
+                    driver.execute_script("arguments[0].click();", sb)
 
         # ── Wait for results page ────────────────────────────────────
         # RULE: homepage URL = never a valid result, even if DOM has flight elements
