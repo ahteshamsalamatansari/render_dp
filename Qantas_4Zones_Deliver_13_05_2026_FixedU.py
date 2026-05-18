@@ -1155,6 +1155,8 @@ def do_search(driver, wait, origin, dest, start_date, attempt=1):
             return "session_dead"   # BD session expired mid-search
         if any(kw in err_lower for kw in ("access denied", "blocked", "403", "captcha")):
             return "blocked"        # Qantas blocked this IP
+        if "never left homepage" in err_str:
+            return "homepage_stuck"  # search submitted but browser stayed on qantas.com
         return False
 
 
@@ -1189,6 +1191,13 @@ def do_search_with_retry(driver, wait, origin, dest, target_date, route_key):
             wait_secs   = 20 * attempt
             needs_fresh = True
             tprint(f"    🔴 [{origin}→{dest}] Access Denied / Blocked — waiting {wait_secs}s then fresh IP...")
+
+        elif result == "homepage_stuck":
+            # Search submitted but browser never left qantas.com — retry with next date
+            target_date = target_date + timedelta(days=1)
+            wait_secs   = 2
+            needs_fresh = False
+            tprint(f"    🏠 [{origin}→{dest}] Stuck on homepage — retrying with next date {target_date}...")
 
         else:
             # Generic failure — check if driver is still alive
