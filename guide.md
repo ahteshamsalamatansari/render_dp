@@ -66,6 +66,21 @@ Each script:
 | `QANTAS_KNX_BME_ZONE` | `qantas_3` |
 | `QANTAS_KNX_BME_PASS` | `n748kj03bomt` |
 
+**Alternate credentials (optional — used automatically to retry any failed route):**
+
+| Variable | Value |
+|----------|-------|
+| `QANTAS_ALT_BME_KNX_ZONE` | *(alternate zone name)* |
+| `QANTAS_ALT_BME_KNX_PASS` | *(alternate zone password)* |
+| `QANTAS_ALT_BME_DRW_ZONE` | *(alternate zone name)* |
+| `QANTAS_ALT_BME_DRW_PASS` | *(alternate zone password)* |
+| `QANTAS_ALT_DRW_KNX_ZONE` | *(alternate zone name)* |
+| `QANTAS_ALT_DRW_KNX_PASS` | *(alternate zone password)* |
+| `QANTAS_ALT_KNX_BME_ZONE` | *(alternate zone name)* |
+| `QANTAS_ALT_KNX_BME_PASS` | *(alternate zone password)* |
+
+> If a route fails or stalls for 5 minutes, the cron moves to the next route. After all 4 routes finish, any failed routes are retried once using the `QANTAS_ALT_*` credentials. Leave these unset to skip the retry.
+
 ---
 
 ### Cron 2 — Airnorth
@@ -147,10 +162,17 @@ Each script:
 | `EMAIL_FROM` | `ahteshamsalamat@gmail.com` |
 | `EMAIL_PASSWORD` | `oxar pkne tppr dtys` |
 | `EMAIL_TO` | `ahteshamansari@bizprospex.com` |
-| `BD_BROWSER_USER` | `brd-customer-hl_fbc4a16a-zone-cont_rex` |
-| `BD_BROWSER_PASS` | `072res2p22t3` |
 | `BD_BROWSER_HOST` | `brd.superproxy.io` |
 | `BD_BROWSER_PORT` | `9222` |
+| `BD_BROWSER_SELENIUM_PORT` | `9515` |
+| `BD_BROWSER_USER` | `brd-customer-hl_fbc4a16a-zone-cont_rex` |
+| `BD_BROWSER_PASS` | `072res2p22t3` |
+| `BD_BROWSER_WSS` | `wss://brd-customer-hl_fbc4a16a-zone-cont_rex:072res2p22t3@brd.superproxy.io:9222` |
+| `BD_BROWSER_SELENIUM_URL` | `https://brd-customer-hl_fbc4a16a-zone-cont_rex:072res2p22t3@brd.superproxy.io:9515` |
+| `BD_AUTH_TOKEN` | `7b1cdf1c-e4e0-4b6c-925b-0121031e6bf7` |
+| `BD_WEB_UNLOCKER_ZONE` | `cron_rex` |
+| `BD_UNLOCKER_COUNTRY` | `au` |
+| `BD_UNLOCKER_ENDPOINT` | `https://api.brightdata.com/request` |
 
 ---
 
@@ -207,6 +229,19 @@ All 4 crons share the same email and Python vars. Airnorth has its own Brightdat
 | `QANTAS_KNX_BME_ZONE` | `qantas_3` |
 | `QANTAS_KNX_BME_PASS` | `n748kj03bomt` |
 
+**Alternate credentials (optional — for auto-retry on route failure):**
+
+| Variable | Value |
+|----------|-------|
+| `QANTAS_ALT_BME_KNX_ZONE` | *(alternate zone name)* |
+| `QANTAS_ALT_BME_KNX_PASS` | *(alternate zone password)* |
+| `QANTAS_ALT_BME_DRW_ZONE` | *(alternate zone name)* |
+| `QANTAS_ALT_BME_DRW_PASS` | *(alternate zone password)* |
+| `QANTAS_ALT_DRW_KNX_ZONE` | *(alternate zone name)* |
+| `QANTAS_ALT_DRW_KNX_PASS` | *(alternate zone password)* |
+| `QANTAS_ALT_KNX_BME_ZONE` | *(alternate zone name)* |
+| `QANTAS_ALT_KNX_BME_PASS` | *(alternate zone password)* |
+
 ---
 
 ### Airnorth — Brightdata Web Unlocker API
@@ -220,14 +255,21 @@ All 4 crons share the same email and Python vars. Airnorth has its own Brightdat
 
 ---
 
-### Rex — Brightdata Browser API
+### Rex — Brightdata Browser API + Web Unlocker API
 
 | Variable | Value |
 |----------|-------|
-| `BD_BROWSER_USER` | `brd-customer-hl_fbc4a16a-zone-cont_rex` |
-| `BD_BROWSER_PASS` | `072res2p22t3` |
 | `BD_BROWSER_HOST` | `brd.superproxy.io` |
 | `BD_BROWSER_PORT` | `9222` |
+| `BD_BROWSER_SELENIUM_PORT` | `9515` |
+| `BD_BROWSER_USER` | `brd-customer-hl_fbc4a16a-zone-cont_rex` |
+| `BD_BROWSER_PASS` | `072res2p22t3` |
+| `BD_BROWSER_WSS` | `wss://brd-customer-hl_fbc4a16a-zone-cont_rex:072res2p22t3@brd.superproxy.io:9222` |
+| `BD_BROWSER_SELENIUM_URL` | `https://brd-customer-hl_fbc4a16a-zone-cont_rex:072res2p22t3@brd.superproxy.io:9515` |
+| `BD_AUTH_TOKEN` | `7b1cdf1c-e4e0-4b6c-925b-0121031e6bf7` |
+| `BD_WEB_UNLOCKER_ZONE` | `cron_rex` |
+| `BD_UNLOCKER_COUNTRY` | `au` |
+| `BD_UNLOCKER_ENDPOINT` | `https://api.brightdata.com/request` |
 
 ---
 
