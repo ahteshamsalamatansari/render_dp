@@ -3367,7 +3367,11 @@ if __name__ == "__main__":
             print_usage()
             sys.exit(1)
     else:
-        routes_to_run = interactive_route_selection()
+        if sys.stdin.isatty():
+            routes_to_run = interactive_route_selection()
+        else:
+            print("   ℹ️  No routes specified — running ALL routes (non-interactive/cron mode)")
+            routes_to_run = list(ALL_ROUTES)
 
     # ── CONFIG APPLY ─────────────────────────────────────────────
     TOTAL_DAYS = max(1, ns.days)
