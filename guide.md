@@ -202,11 +202,19 @@ Each script:
 | `EMAIL_TO` | `ahteshamansari@bizprospex.com` |
 | `BD_BROWSER_HOST` | `brd.superproxy.io` |
 | `BD_BROWSER_SELENIUM_PORT` | `9515` |
-| `BD_BROWSER_USER` | `brd-customer-hl_fbc4a16a-zone-cont_rex` |
-| `BD_BROWSER_PASS` | `072res2p22t3` |
 | `BD_AUTH_TOKEN` | `7b1cdf1c-e4e0-4b6c-925b-0121031e6bf7` |
 | `BD_WEB_UNLOCKER_ZONE` | `cron_rex` |
 | `BD_UNLOCKER_COUNTRY` | `au` |
+| `BD_PER_MJK_USER` | `brd-customer-hl_fbc4a16a-zone-rex_root_8` |
+| `BD_PER_MJK_PASS` | `46yox0svep00` |
+| `BD_PER_MJK_SELENIUM_URL` | `https://brd-customer-hl_fbc4a16a-zone-rex_root_8:46yox0svep00@brd.superproxy.io:9515` |
+| `BD_MJK_PER_USER` | `brd-customer-hl_fbc4a16a-zone-rex_root_7` |
+| `BD_MJK_PER_PASS` | `iqeo716xnvw1` |
+| `BD_MJK_PER_SELENIUM_URL` | `https://brd-customer-hl_fbc4a16a-zone-rex_root_7:iqeo716xnvw1@brd.superproxy.io:9515` |
+
+> `BD_PER_MJK_SELENIUM_URL` is used for PER→MJK (zone `rex_root_8`).  
+> `BD_MJK_PER_SELENIUM_URL` is used for MJK→PER (zone `rex_root_7`).  
+> The `_USER` / `_PASS` vars are optional — only needed if you want to override individual parts rather than the full URL.
 
 ---
 
@@ -307,19 +315,26 @@ All 5 crons share the same email and Python vars. Airnorth has its own Brightdat
 
 ---
 
-### Rex PER↔MJK (`cron_rex_78`) — Brightdata Selenium Browser
+### Rex PER↔MJK (`cron_rex_78`) — Brightdata Selenium Browser (2 zones)
+
+Each route uses its own dedicated Brightdata zone:
 
 | Variable | Value |
 |----------|-------|
 | `BD_BROWSER_HOST` | `brd.superproxy.io` |
 | `BD_BROWSER_SELENIUM_PORT` | `9515` |
-| `BD_BROWSER_USER` | `brd-customer-hl_fbc4a16a-zone-cont_rex` |
-| `BD_BROWSER_PASS` | `072res2p22t3` |
 | `BD_AUTH_TOKEN` | `7b1cdf1c-e4e0-4b6c-925b-0121031e6bf7` |
 | `BD_WEB_UNLOCKER_ZONE` | `cron_rex` |
 | `BD_UNLOCKER_COUNTRY` | `au` |
+| `BD_PER_MJK_USER` | `brd-customer-hl_fbc4a16a-zone-rex_root_8` |
+| `BD_PER_MJK_PASS` | `46yox0svep00` |
+| `BD_PER_MJK_SELENIUM_URL` | `https://brd-customer-hl_fbc4a16a-zone-rex_root_8:46yox0svep00@brd.superproxy.io:9515` |
+| `BD_MJK_PER_USER` | `brd-customer-hl_fbc4a16a-zone-rex_root_7` |
+| `BD_MJK_PER_PASS` | `iqeo716xnvw1` |
+| `BD_MJK_PER_SELENIUM_URL` | `https://brd-customer-hl_fbc4a16a-zone-rex_root_7:iqeo716xnvw1@brd.superproxy.io:9515` |
 
-> This cron uses Selenium (not Playwright). Only the Selenium port (9515) is needed — no CDP WSS connection.
+> PER→MJK connects via zone `rex_root_8`. MJK→PER connects via zone `rex_root_7`.  
+> This cron uses Selenium (not Playwright) — no CDP WSS connection needed.
 
 ---
 

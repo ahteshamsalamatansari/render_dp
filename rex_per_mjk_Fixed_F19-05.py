@@ -48,18 +48,34 @@ if hasattr(sys.stderr, "reconfigure"):
 # ─────────────────────────────────────────────────────────────
 #  BRIGHT DATA CREDENTIALS
 # ─────────────────────────────────────────────────────────────
-BD_BROWSER_HOST         = os.getenv("BD_BROWSER_HOST", "brd.superproxy.io")
+BD_BROWSER_HOST          = os.getenv("BD_BROWSER_HOST", "brd.superproxy.io")
 BD_BROWSER_SELENIUM_PORT = os.getenv("BD_BROWSER_SELENIUM_PORT", "9515")
-BD_BROWSER_USER         = os.getenv("BD_BROWSER_USER", "brd-customer-hl_fbc4a16a-zone-cont_rex")
-BD_BROWSER_PASS         = os.getenv("BD_BROWSER_PASS", "072res2p22t3")
-BD_AUTH_TOKEN           = os.getenv("BD_AUTH_TOKEN", "7b1cdf1c-e4e0-4b6c-925b-0121031e6bf7")
-BD_WEB_UNLOCKER_ZONE    = os.getenv("BD_WEB_UNLOCKER_ZONE", "cron_rex")
-BD_UNLOCKER_COUNTRY     = os.getenv("BD_UNLOCKER_COUNTRY", "au")
+BD_AUTH_TOKEN            = os.getenv("BD_AUTH_TOKEN", "7b1cdf1c-e4e0-4b6c-925b-0121031e6bf7")
+BD_WEB_UNLOCKER_ZONE     = os.getenv("BD_WEB_UNLOCKER_ZONE", "cron_rex")
+BD_UNLOCKER_COUNTRY      = os.getenv("BD_UNLOCKER_COUNTRY", "au")
 
-BD_SELENIUM_URL = (
-    f"https://{BD_BROWSER_USER}:{BD_BROWSER_PASS}"
-    f"@{BD_BROWSER_HOST}:{BD_BROWSER_SELENIUM_PORT}"
+# PER → MJK uses zone rex_root_8
+BD_PER_MJK_USER = os.getenv("BD_PER_MJK_USER", "brd-customer-hl_fbc4a16a-zone-rex_root_8")
+BD_PER_MJK_PASS = os.getenv("BD_PER_MJK_PASS", "46yox0svep00")
+
+# MJK → PER uses zone rex_root_7
+BD_MJK_PER_USER = os.getenv("BD_MJK_PER_USER", "brd-customer-hl_fbc4a16a-zone-rex_root_7")
+BD_MJK_PER_PASS = os.getenv("BD_MJK_PER_PASS", "iqeo716xnvw1")
+
+BD_PER_MJK_SELENIUM_URL = os.getenv(
+    "BD_PER_MJK_SELENIUM_URL",
+    f"https://{BD_PER_MJK_USER}:{BD_PER_MJK_PASS}@{BD_BROWSER_HOST}:{BD_BROWSER_SELENIUM_PORT}",
 )
+BD_MJK_PER_SELENIUM_URL = os.getenv(
+    "BD_MJK_PER_SELENIUM_URL",
+    f"https://{BD_MJK_PER_USER}:{BD_MJK_PER_PASS}@{BD_BROWSER_HOST}:{BD_BROWSER_SELENIUM_PORT}",
+)
+
+# Route → Selenium URL mapping
+ROUTE_SELENIUM_URL: dict[tuple[str, str], str] = {
+    ("PER", "MJK"): BD_PER_MJK_SELENIUM_URL,
+    ("MJK", "PER"): BD_MJK_PER_SELENIUM_URL,
+}
 
 # ─────────────────────────────────────────────────────────────
 #  CONFIG
@@ -438,7 +454,7 @@ def save_debug(driver, label: str, meta: dict | None = None) -> str:
 #  SELENIUM DRIVER FACTORY
 # ─────────────────────────────────────────────────────────────
 
-def make_driver(max_attempts: int = 4) -> webdriver.Remote:
+def make_driver(selenium_url: str, max_attempts: int = 4) -> webdriver.Remote:
     """
     Connect to Bright Data Selenium endpoint.
     Retries automatically on transient Internal Server Errors — these are
@@ -458,7 +474,7 @@ def make_driver(max_attempts: int = 4) -> webdriver.Remote:
         driver = None
         try:
             driver = webdriver.Remote(
-                command_executor=BD_SELENIUM_URL,
+                command_executor=selenium_url,
                 options=opts,
             )
             driver.set_page_load_timeout(PAGE_TIMEOUT)
@@ -934,7 +950,8 @@ def wait_for_search_result(driver, target_dt: datetime, timeout: int = 90) -> tu
 # ─────────────────────────────────────────────────────────────
 
 def scrape_one_date(origin: str, dest: str, target_dt: datetime,
-                    attempt: int, store: OutputStore) -> tuple[str, list[dict], str]:
+                    attempt: int, store: OutputStore,
+                    selenium_url: str = "") -> tuple[str, list[dict], str]:
     """
     Create a fresh driver → open homepage → fill form → submit → extract → quit driver.
 
@@ -943,10 +960,11 @@ def scrape_one_date(origin: str, dest: str, target_dt: datetime,
     date_str = output_date(target_dt)
     label    = f"{RUN_ID}_{origin}_{dest}_{date_str}_attempt_{attempt}"
     driver   = None
+    url      = selenium_url or ROUTE_SELENIUM_URL.get((origin, dest), BD_PER_MJK_SELENIUM_URL)
 
     try:
-        print(f"   🔌 Connecting to Bright Data Selenium...")
-        driver = make_driver()
+        print(f"   🔌 Connecting to Bright Data Selenium (zone: {url.split('@')[1] if '@' in url else url})...")
+        driver = make_driver(url)
         print("   ✅ Driver connected")
 
         # ── Step 1: Homepage ──────────────────────────────────
@@ -1063,9 +1081,12 @@ def run_route(origin: str, dest: str, store: OutputStore):
     dates = build_date_list()
     origin_name = AIRPORT_MAP.get(origin, origin)
     dest_name   = AIRPORT_MAP.get(dest, dest)
+    selenium_url = ROUTE_SELENIUM_URL.get((origin, dest), BD_PER_MJK_SELENIUM_URL)
+    zone_label   = selenium_url.split("zone-")[-1].split(":")[0] if "zone-" in selenium_url else "unknown"
 
     print(f"\n{'█'*60}")
     print(f"  ROUTE : {origin} ({origin_name}) → {dest} ({dest_name})")
+    print(f"  Zone  : {zone_label}")
     print(f"  Dates : {dates[0].strftime('%d-%m-%Y')} → {dates[-1].strftime('%d-%m-%Y')}")
     print(f"  Output: {OUTPUT_EXCEL}")
     print(f"  Attempts/date: {MAX_ATTEMPTS}")
@@ -1094,7 +1115,7 @@ def run_route(origin: str, dest: str, store: OutputStore):
                 time.sleep(backoff)
 
             print(f"   🔁 Attempt {attempt}/{MAX_ATTEMPTS} — {origin}→{dest} {date_str}")
-            status, rows, debug = scrape_one_date(origin, dest, target_dt, attempt, store)
+            status, rows, debug = scrape_one_date(origin, dest, target_dt, attempt, store, selenium_url)
 
             final_status = status
             final_rows   = rows
