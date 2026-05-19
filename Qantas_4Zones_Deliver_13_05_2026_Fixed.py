@@ -30,7 +30,6 @@ import random
 import traceback
 import argparse
 import threading
-import os
 from datetime import datetime, timedelta, date
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -44,25 +43,9 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.keys import Keys
 from selenium.common.exceptions import TimeoutException
 
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except Exception:
-    pass
-
 # ══════════════════════════════════════════════════════════════════
 #  ROUTES & CREDENTIALS — Edit only this section if things change
 # ══════════════════════════════════════════════════════════════════
-
-def _env_zone(env_name, default, legacy_env_name=None):
-    """Read a Bright Data zone from env and normalize full usernames to zone names."""
-    value = os.getenv(env_name)
-    if not value and legacy_env_name:
-        value = os.getenv(legacy_env_name)
-    value = (value or default).strip()
-    if "-zone-" in value:
-        value = value.split("-zone-", 1)[1]
-    return value
 
 ROUTES = [
     ("BME", "KNX"),   # Route 1 — Standard
@@ -73,34 +56,15 @@ ROUTES = [
 
 # Each route gets its OWN zone — zero conflict guaranteed
 ROUTE_CREDENTIALS = {
-    ("BME", "KNX"): {
-        "zone": _env_zone("QANTAS_BME_KNX_ZONE", "scraping_browser2", "BRIGHTDATA_ZONE"),
-        "password": os.getenv("QANTAS_BME_KNX_PASS", os.getenv("BRIGHTDATA_PASS", "nymmsv0ffs60")),
-    },
-    ("BME", "DRW"): {
-        "zone": _env_zone("QANTAS_BME_DRW_ZONE", "qantas_1"),
-        "password": os.getenv("QANTAS_BME_DRW_PASS", "x9ck9dpthpsg"),
-    },
-    ("DRW", "KNX"): {
-        "zone": _env_zone("QANTAS_DRW_KNX_ZONE", "qantas_2"),
-        "password": os.getenv("QANTAS_DRW_KNX_PASS", "kgu154ajo3d9"),
-    },
-    ("KNX", "BME"): {
-        "zone": _env_zone("QANTAS_KNX_BME_ZONE", "qantas_3"),
-        "password": os.getenv("QANTAS_KNX_BME_PASS", "n748kj03bomt"),
-    },
+    ("BME", "KNX"): {"zone": "scraping_browser2", "password": "nymmsv0ffs60"},
+    ("BME", "DRW"): {"zone": "qantas_1",           "password": "x9ck9dpthpsg"},
+    ("DRW", "KNX"): {"zone": "qantas_2",           "password": "kgu154ajo3d9"},
+    ("KNX", "BME"): {"zone": "qantas_3",           "password": "n748kj03bomt"},
 }
 
-BRIGHTDATA_HOST     = os.getenv("BRIGHTDATA_HOST", "brd.superproxy.io").strip()
-BRIGHTDATA_PORT     = int(os.getenv("BRIGHTDATA_PORT", "9515").strip())
-CUSTOMER_ID         = os.getenv("BRIGHTDATA_CUSTOMER_ID", "hl_fbc4a16a").strip()
-
-# ── Debug: print resolved credentials at import time ──
-print(f"  [DEBUG] CUSTOMER_ID  = '{CUSTOMER_ID}'")
-print(f"  [DEBUG] BD_HOST:PORT = {BRIGHTDATA_HOST}:{BRIGHTDATA_PORT}")
-for _rk, _rc in ROUTE_CREDENTIALS.items():
-    print(f"  [DEBUG] Route {_rk[0]}→{_rk[1]}: zone='{_rc['zone']}' pass_len={len(_rc['password'])}")
-print()
+BRIGHTDATA_HOST     = "brd.superproxy.io"
+BRIGHTDATA_PORT     = 9515
+CUSTOMER_ID         = "hl_fbc4a16a"
 
 AIRPORT_NAMES = {"BME": "Broome", "KNX": "Kununurra", "DRW": "Darwin"}
 AIRLINE       = "Qantas"
@@ -138,6 +102,8 @@ def _make_user(zone, country="au"):
 
 def make_driver(route_key, country="au", max_attempts=3):
     """Connect to Bright Data — retries up to max_attempts times on connection failure."""
+    from selenium.webdriver.remote.client_config import ClientConfig
+
     creds = ROUTE_CREDENTIALS[route_key]
     zone  = creds["zone"]
     pwd   = creds["password"]
@@ -147,9 +113,7 @@ def make_driver(route_key, country="au", max_attempts=3):
     for conn_attempt in range(1, max_attempts + 1):
         user = _make_user(zone, country)
         tprint(f"  🌐 {tag} BD connect attempt {conn_attempt}/{max_attempts} — zone={zone} session={user.split('-session-')[-1]}")
-        tprint(f"  🔑 {tag} Full username: {user}")
         try:
-            from selenium.webdriver.remote.client_config import ClientConfig
             server_url = f"https://{BRIGHTDATA_HOST}:{BRIGHTDATA_PORT}"
             config     = ClientConfig(remote_server_addr=server_url, username=user, password=pwd)
             connection = Connection(server_url, "goog", "chrome", client_config=config)
@@ -1016,6 +980,7 @@ def do_search(driver, wait, origin, dest, start_date, attempt=1):
             "https://www.qantas.com/",
             "https://www.qantas.com",
         }
+
         # DOM selectors that are SAFE (not present on homepage)
         result_selectors_safe = [
             ".cal-tab-body",
@@ -1092,6 +1057,44 @@ def do_search(driver, wait, origin, dest, start_date, attempt=1):
                     if any(kw in page_title for kw in ("access denied", "403", "blocked")):
                         raise Exception(f"Access Denied after redirect at {cur_url}")
 
+                # ── Final check: verify the results page actually has a date ribbon ──
+                time.sleep(5)   # let page fully render
+                ribbon_ok = driver.execute_script("""
+                    let sels = ['.cal-tab-body','[id*="tab-date"]','.date-ribbon__tab',
+                                '.flex-linear-calendar button','[role="tab"]'];
+                    for (let s of sels) {
+                        let els = Array.from(document.querySelectorAll(s)).filter(e => {
+                            let txt = (e.innerText||'').trim();
+                            return /\\d/.test(txt) && txt.length < 300;
+                        });
+                        if (els.length >= 3) return els.length;
+                    }
+                    return 0;
+                """)
+                if not ribbon_ok:
+                    tprint(f"    ⚠️  {tag} URL moved but NO date ribbon found ({cur_url}) — waiting more...")
+                    # Wait up to 20s more for ribbon to appear
+                    for _ in range(4):
+                        time.sleep(5)
+                        ribbon_ok = driver.execute_script("""
+                            let sels = ['.cal-tab-body','[id*="tab-date"]','.date-ribbon__tab',
+                                        '.flex-linear-calendar button','[role="tab"]'];
+                            for (let s of sels) {
+                                let els = Array.from(document.querySelectorAll(s)).filter(e => {
+                                    let txt = (e.innerText||'').trim();
+                                    return /\\d/.test(txt) && txt.length < 300;
+                                });
+                                if (els.length >= 3) return els.length;
+                            }
+                            return 0;
+                        """)
+                        if ribbon_ok:
+                            break
+                    if not ribbon_ok:
+                        tprint(f"    ⚠️  {tag} Ribbon still not found — returning False to force re-search")
+                        return False
+
+                tprint(f"    ✅ {tag} Date ribbon confirmed ({ribbon_ok} tabs)")
                 results_found = True
                 time.sleep(2)
                 break
