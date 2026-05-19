@@ -48,8 +48,6 @@ SCRAPER = {
         "EPR → PER (Esperance → Perth)",
         "PER → CVQ (Perth → Carnarvon)",
         "CVQ → PER (Carnarvon → Perth)",
-        "PER → MJK (Perth → Monkey Mia)",
-        "MJK → PER (Monkey Mia → Perth)",
         "CVQ → MJK (Carnarvon → Monkey Mia)",
         "MJK → CVQ (Monkey Mia → Carnarvon)",
     ],

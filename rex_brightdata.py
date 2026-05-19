@@ -136,14 +136,13 @@ ALL_ROUTES = [
     ("PER", "ALH"), ("ALH", "PER"),
     ("PER", "EPR"), ("EPR", "PER"),
     ("PER", "CVQ"), ("CVQ", "PER"),
-    ("PER", "MJK"), ("MJK", "PER"),
     ("CVQ", "MJK"), ("MJK", "CVQ"),
 ]
 
 CONNECTING_ROUTES = {("CVQ", "MJK"), ("MJK", "CVQ")}
 
 # Yeh routes Rex pe ribbon nahi dikhate — hamesha fresh search karenge
-NO_RIBBON_ROUTES = {("PER", "MJK"), ("MJK", "PER")}
+NO_RIBBON_ROUTES = set()
 
 TOTAL_DAYS = int(os.getenv("REX_TOTAL_DAYS", "84"))
 START_OFFSET_DAYS = int(os.getenv("REX_START_OFFSET_DAYS", "1"))
