@@ -1253,10 +1253,18 @@ if __name__ == "__main__":
             if len(parts) == 2:
                 routes_to_run.append((parts[0], parts[1]))
         if not routes_to_run:
-            print("❌ Could not parse --routes; falling back to interactive menu.")
-            routes_to_run = interactive_route_selection()
+            if sys.stdin.isatty():
+                print("❌ Could not parse --routes; falling back to interactive menu.")
+                routes_to_run = interactive_route_selection()
+            else:
+                print("   ℹ️  Could not parse --routes — running ALL routes (non-interactive/cron mode)")
+                routes_to_run = list(ROUTES)
     else:
-        routes_to_run = interactive_route_selection()
+        if sys.stdin.isatty():
+            routes_to_run = interactive_route_selection()
+        else:
+            print("   ℹ️  No routes specified — running ALL routes (non-interactive/cron mode)")
+            routes_to_run = list(ROUTES)
 
     store = OutputStore(OUTPUT_EXCEL)
 
