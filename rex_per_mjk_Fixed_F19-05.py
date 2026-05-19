@@ -99,8 +99,8 @@ DEBUG_DIR     = os.getenv("REX_DEBUG_DIR", "rex_debug")
 LOG_DIR       = os.getenv("REX_LOG_DIR", "rex_logs")
 RUN_ID        = os.getenv("REX_RUN_ID", datetime.now(REX_TZ).strftime("%Y%m%d"))
 MAX_ATTEMPTS  = int(os.getenv("REX_MAX_ATTEMPTS", "3"))
-PAGE_TIMEOUT  = int(os.getenv("REX_PAGE_TIMEOUT", "90"))        # seconds
-CAPTCHA_WAIT  = int(os.getenv("REX_CAPTCHA_WAIT", "60"))        # seconds
+PAGE_TIMEOUT  = int(os.getenv("REX_PAGE_TIMEOUT", "180"))       # seconds — Rex results take time via Brightdata
+CAPTCHA_WAIT  = int(os.getenv("REX_CAPTCHA_WAIT", "90"))        # seconds
 
 STATUS_SUCCESS  = "SUCCESS"
 STATUS_NO_FARE  = "NO_FARE_AVAILABLE"
