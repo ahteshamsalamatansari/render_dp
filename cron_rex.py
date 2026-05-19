@@ -35,21 +35,14 @@ RETRY_ERRORS  = ("Connection aborted.", "RemoteDisconnected")
 # ── Scraper definition ─────────────────────────────────
 
 SCRAPER = {
-    "name": "Rex Airlines",
+    "name": "Rex Airlines — PER↔MJK",
     "command": [
-        "python", "rex_brightdata.py",
-        "--skip-unblocker-check",
-        "--output", "output/rex_results_all_routes.xlsx",
+        "python", "rex_per_mjk_Fixed_F19-05.py",
+        "--output", "output/rex_per_mjk_results.xlsx",
     ],
     "routes": [
-        "PER → ALH (Perth → Albany)",
-        "ALH → PER (Albany → Perth)",
-        "PER → EPR (Perth → Esperance)",
-        "EPR → PER (Esperance → Perth)",
-        "PER → CVQ (Perth → Carnarvon)",
-        "CVQ → PER (Carnarvon → Perth)",
-        "CVQ → MJK (Carnarvon → Monkey Mia)",
-        "MJK → CVQ (Monkey Mia → Carnarvon)",
+        "PER → MJK (Perth → Monkey Mia)",
+        "MJK → PER (Monkey Mia → Perth)",
     ],
 }
 
