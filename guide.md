@@ -1,7 +1,7 @@
-# Render Deployment Guide — 4 Airline Cron Jobs
+# Render Deployment Guide — 5 Airline Cron Jobs
 
 Each airline runs as its **own separate Cron Job** on Render, connected to its own branch.  
-All 4 crons live in the same GitHub repo — only the branch and start command differ.
+All 5 crons live in the same GitHub repo — only the branch and start command differ.
 
 ---
 
@@ -13,6 +13,7 @@ All 4 crons live in the same GitHub repo — only the branch and start command d
 | `cron-airnorth`      | `cron/airnorth` | `python cron_airnorth.py`  | 16 |
 | `cron-nexus`         | `cron/nexus`    | `python cron_nexus.py`     | — |
 | `cron-rex`           | `cron/rex`      | `python cron_rex.py`       | — |
+| `cron-rex-78`        | `cron_rex_78`   | `python cron_rex.py`       | — |
 
 Each script:
 - Retries up to 3 times (60s delay) if a `Connection aborted` / `RemoteDisconnected` error is detected
@@ -151,8 +152,9 @@ Each script:
 | Start Command | `python cron_rex.py` |
 | Schedule | *(set per timezone table below)* |
 
-**Routes:** PER↔ALH, PER↔EPR, PER↔CVQ, PER↔MJK, CVQ↔MJK (10 routes total)  
-**Script:** `rex_brightdata.py`
+**Routes:** PER↔ALH, PER↔EPR, PER↔CVQ, CVQ↔MJK (8 routes total)  
+**Script:** `rex_brightdata.py`  
+> PER↔MJK routes are handled by the separate `cron-rex-78` cron (see Cron 5).
 
 **Environment Variables — add these in Render under Environment:**
 
@@ -176,6 +178,38 @@ Each script:
 
 ---
 
+### Cron 5 — Rex Airlines PER↔MJK
+
+| Setting | Value |
+|---------|-------|
+| Name | `cron-rex-78` |
+| Branch | `cron_rex_78` |
+| Runtime | `Python` |
+| Build Command | `pip install -r requirements.txt` |
+| Start Command | `python cron_rex.py` |
+| Schedule | *(set per timezone table below)* |
+
+**Routes:** PER→MJK, MJK→PER (2 routes — Perth ↔ Monkey Mia)  
+**Script:** `rex_per_mjk_Fixed_F19-05.py` — Selenium + Brightdata Scraping Browser (port 9515)
+
+**Environment Variables — add these in Render under Environment:**
+
+| Variable | Value |
+|----------|-------|
+| `PYTHON_VERSION` | `3.11.8` |
+| `EMAIL_FROM` | `ahteshamsalamat@gmail.com` |
+| `EMAIL_PASSWORD` | `oxar pkne tppr dtys` |
+| `EMAIL_TO` | `ahteshamansari@bizprospex.com` |
+| `BD_BROWSER_HOST` | `brd.superproxy.io` |
+| `BD_BROWSER_SELENIUM_PORT` | `9515` |
+| `BD_BROWSER_USER` | `brd-customer-hl_fbc4a16a-zone-cont_rex` |
+| `BD_BROWSER_PASS` | `072res2p22t3` |
+| `BD_AUTH_TOKEN` | `7b1cdf1c-e4e0-4b6c-925b-0121031e6bf7` |
+| `BD_WEB_UNLOCKER_ZONE` | `cron_rex` |
+| `BD_UNLOCKER_COUNTRY` | `au` |
+
+---
+
 ## Step 3 — Schedule (UTC)
 
 Render schedules run in **UTC**. Use the table below to target 7:00 AM local time:
@@ -193,9 +227,9 @@ Render schedules run in **UTC**. Use the table below to target 7:00 AM local tim
 ## Step 4 — Environment Variables
 
 Set these in each cron job under **Environment** in the Render dashboard.  
-All 4 crons share the same email and Python vars. Airnorth has its own Brightdata vars.
+All 5 crons share the same email and Python vars. Airnorth has its own Brightdata vars.
 
-### All 4 Crons — Email
+### All 5 Crons — Email
 
 | Variable | Value |
 |----------|-------|
@@ -203,7 +237,7 @@ All 4 crons share the same email and Python vars. Airnorth has its own Brightdat
 | `EMAIL_PASSWORD` | *(Gmail App Password)* |
 | `EMAIL_TO` | `ahteshamansari@bizprospex.com` |
 
-### All 4 Crons — Python Version
+### All 5 Crons — Python Version
 
 | Variable | Value |
 |----------|-------|
@@ -255,7 +289,7 @@ All 4 crons share the same email and Python vars. Airnorth has its own Brightdat
 
 ---
 
-### Rex — Brightdata Browser API + Web Unlocker API
+### Rex (`cron/rex`) — Brightdata Browser API + Web Unlocker API
 
 | Variable | Value |
 |----------|-------|
@@ -270,6 +304,22 @@ All 4 crons share the same email and Python vars. Airnorth has its own Brightdat
 | `BD_WEB_UNLOCKER_ZONE` | `cron_rex` |
 | `BD_UNLOCKER_COUNTRY` | `au` |
 | `BD_UNLOCKER_ENDPOINT` | `https://api.brightdata.com/request` |
+
+---
+
+### Rex PER↔MJK (`cron_rex_78`) — Brightdata Selenium Browser
+
+| Variable | Value |
+|----------|-------|
+| `BD_BROWSER_HOST` | `brd.superproxy.io` |
+| `BD_BROWSER_SELENIUM_PORT` | `9515` |
+| `BD_BROWSER_USER` | `brd-customer-hl_fbc4a16a-zone-cont_rex` |
+| `BD_BROWSER_PASS` | `072res2p22t3` |
+| `BD_AUTH_TOKEN` | `7b1cdf1c-e4e0-4b6c-925b-0121031e6bf7` |
+| `BD_WEB_UNLOCKER_ZONE` | `cron_rex` |
+| `BD_UNLOCKER_COUNTRY` | `au` |
+
+> This cron uses Selenium (not Playwright). Only the Selenium port (9515) is needed — no CDP WSS connection.
 
 ---
 
@@ -314,7 +364,8 @@ Run any cron script locally with `--dry-run` to verify email works without scrap
 python cron_qantas.py --dry-run
 python cron_airnorth.py --dry-run
 python cron_nexus.py --dry-run
-python cron_rex.py --dry-run
+python cron_rex.py --dry-run          # cron/rex  (routes 1-6 + CVQ↔MJK)
+python cron_rex.py --dry-run          # cron_rex_78  (PER↔MJK)
 ```
 
 This skips the scraper and emails any existing files in `output/`.
@@ -329,7 +380,7 @@ When you update a scraper script:
 2. Commit and push
 3. Render auto-deploys on the next scheduled run (or click **Trigger Run** to test immediately)
 
-To update **all 4 crons** at once, make changes on `claude/zen-davinci-2848a8` then merge/rebase into each `cron/*` branch and push.
+To update **all 5 crons** at once, make changes on `claude/zen-davinci-2848a8` then merge/rebase into each `cron/*` branch and push.
 
 ---
 
