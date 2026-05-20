@@ -1,6 +1,8 @@
 """
 Cron: Airnorth scraper + email
-Runs Airnorth via Brightdata, retries on connection errors, emails output on completion.
+Runs each Airnorth route one at a time and emails the output file as soon as
+that route finishes, so the client receives 4 separate emails with attachments
+rather than waiting for all routes to complete.
 """
 
 import os
@@ -32,18 +34,32 @@ MAX_RETRIES   = 3
 RETRY_DELAY_S = 60
 RETRY_ERRORS  = ("Connection aborted.", "RemoteDisconnected")
 
-# ── Scraper definition ─────────────────────────────────
+# ── Route definitions ──────────────────────────────────
+# Each route runs as its own subprocess so an email is sent as soon as it
+# finishes — the client gets data incrementally rather than all at once.
 
-SCRAPER = {
-    "name": "Airnorth",
-    "command": ["python", "airnorth_brightdata_Main.py", "--all", "--workers", "16"],
-    "routes": [
-        "BME → KNX (Broome → Kununurra)",
-        "BME → DRW (Broome → Darwin)",
-        "DRW → KNX (Darwin → Kununurra)",
-        "KNX → BME (Kununurra → Broome)",
-    ],
-}
+ROUTES = [
+    {
+        "name": "Airnorth BME → KNX",
+        "route_arg": "BME-KNX",
+        "label": "BME → KNX (Broome → Kununurra)",
+    },
+    {
+        "name": "Airnorth BME → DRW",
+        "route_arg": "BME-DRW",
+        "label": "BME → DRW (Broome → Darwin)",
+    },
+    {
+        "name": "Airnorth DRW → KNX",
+        "route_arg": "DRW-KNX",
+        "label": "DRW → KNX (Darwin → Kununurra)",
+    },
+    {
+        "name": "Airnorth KNX → BME",
+        "route_arg": "KNX-BME",
+        "label": "KNX → BME (Kununurra → Broome)",
+    },
+]
 
 # ── Helpers ─────────────────────────────────────────────
 
@@ -110,9 +126,7 @@ def build_email_body(result: dict, files: list[Path]) -> str:
     lines.append(f"{status_icon}  {result['name']}")
     lines.append(f"    Status   : {'Completed' if result['success'] else 'FAILED'}")
     lines.append(f"    Duration : {result['duration']}")
-    lines.append(f"    Routes   :")
-    for route in result["routes"]:
-        lines.append(f"      • {route}")
+    lines.append(f"    Route    : {result['label']}")
     lines.append("")
     lines.append("-" * 55)
     if files:
@@ -135,7 +149,7 @@ def send_email(result: dict, files: list[Path]) -> None:
 
     today = datetime.now().strftime("%Y-%m-%d")
     status = "OK" if result["success"] else "FAILED"
-    subject = f"Airnorth Scraper — {today} — {status}"
+    subject = f"Airnorth {result['route_arg']} — {today} — {status}"
     body = build_email_body(result, files)
 
     msg = MIMEMultipart()
@@ -170,24 +184,24 @@ def send_email(result: dict, files: list[Path]) -> None:
         log(f"❌ Email failed: {e}")
 
 
-# ── Runner ───────────────────────────────────────────────
+# ── Per-route runner ─────────────────────────────────────
 
-def run_scraper() -> dict:
-    name   = SCRAPER["name"]
-    cmd    = SCRAPER["command"]
-    routes = SCRAPER["routes"]
+def run_route(route: dict) -> dict:
+    name      = route["name"]
+    route_arg = route["route_arg"]
+    label     = route["label"]
+    cmd       = ["python", "airnorth_brightdata_Main.py", "--route", route_arg, "--workers", "16"]
 
     log(f"{'━' * 55}")
-    log(f"🚀 Starting {name} scraper...")
+    log(f"🚀 Starting {name}...")
+    log(f"   Route  : {label}")
     log(f"   Command: {' '.join(cmd)}")
-    for route in routes:
-        log(f"     • {route}")
     log("")
 
-    start = time.time()
-    success = False
+    start     = time.time()
+    success   = False
     exit_code = -1
-    duration = "0s"
+    duration  = "0s"
 
     for attempt in range(1, MAX_RETRIES + 1):
         if attempt > 1:
@@ -197,13 +211,12 @@ def run_scraper() -> dict:
         try:
             env = os.environ.copy()
             env["PYTHONUNBUFFERED"] = "1"
-            env["TZ"] = "Australia/Perth"
 
-            returncode, output = stream_process(cmd, env, timeout=14400)
-            elapsed = time.time() - start
+            returncode, output = stream_process(cmd, env, timeout=7200)
+            elapsed  = time.time() - start
             duration = format_duration(elapsed)
             exit_code = returncode
-            success = returncode == 0
+            success   = returncode == 0
 
             if success:
                 log(f"✅ {name} completed in {duration}")
@@ -220,54 +233,81 @@ def run_scraper() -> dict:
             duration = format_duration(time.time() - start)
             log(f"⏰ {name} timed out after {duration}")
             exit_code = -1
-            success = False
+            success   = False
             break
 
         except Exception as e:
             duration = format_duration(time.time() - start)
             log(f"💥 {name} crashed: {e}")
             exit_code = -1
-            success = False
+            success   = False
             break
 
-    return {"name": name, "success": success, "exit_code": exit_code, "duration": duration, "routes": routes}
+    return {
+        "name":      name,
+        "route_arg": route_arg,
+        "label":     label,
+        "success":   success,
+        "exit_code": exit_code,
+        "duration":  duration,
+    }
 
+
+# ── Main ────────────────────────────────────────────────
 
 def main():
     import argparse
-    parser = argparse.ArgumentParser(description="Airnorth cron: scrape + email")
-    parser.add_argument("--dry-run", action="store_true", help="Skip scraper, email existing files")
+    parser = argparse.ArgumentParser(description="Airnorth cron: scrape all routes + email per route")
+    parser.add_argument("--dry-run", action="store_true", help="Skip scrapers, email existing files")
     args = parser.parse_args()
 
     log("=" * 55)
     log("🗓️  Airnorth Scraper Cron")
     log(f"   Date  : {datetime.now().strftime('%A, %d %B %Y %H:%M %Z')}")
     log(f"   Mode  : {'DRY RUN' if args.dry_run else 'FULL RUN'}")
+    log(f"   Routes: {len(ROUTES)}")
     log("=" * 55)
     log("")
 
-    job_start = time.time()
+    any_failed = False
 
-    if args.dry_run:
-        log("🔸 Dry run — skipping scraper.")
-        result = {"name": SCRAPER["name"], "success": True, "exit_code": 0, "duration": "dry-run", "routes": SCRAPER["routes"]}
-        files = [f for f in OUTPUT_DIR.rglob("*") if f.is_file() and f.suffix.lower() in (".csv", ".xlsx")]
-    else:
-        result = run_scraper()
-        files = collect_output_files_since(job_start)
+    for i, route in enumerate(ROUTES, 1):
+        log(f"[Route {i}/{len(ROUTES)}] {route['label']}")
 
-    log(f"\n📁 Found {len(files)} output file(s).")
-    for f in files:
-        log(f"   • {f}")
+        route_start = time.time()
 
-    send_email(result, files)
+        if args.dry_run:
+            result = {
+                "name":      route["name"],
+                "route_arg": route["route_arg"],
+                "label":     route["label"],
+                "success":   True,
+                "exit_code": 0,
+                "duration":  "dry-run",
+            }
+            files = [
+                f for f in OUTPUT_DIR.rglob("*")
+                if f.is_file() and f.suffix.lower() in (".csv", ".xlsx")
+            ]
+        else:
+            result = run_route(route)
+            files  = collect_output_files_since(route_start)
 
-    log("")
+        log(f"\n📁 Found {len(files)} output file(s) for {route['name']}.")
+        for f in files:
+            log(f"   • {f}")
+
+        send_email(result, files)
+        log("")
+
+        if not result["success"]:
+            any_failed = True
+
     log("=" * 55)
-    log(f"🏁 Done — {'Success' if result['success'] else 'FAILED'}")
+    log(f"🏁 Done — {'FAILED (one or more routes)' if any_failed else 'All routes succeeded'}")
     log("=" * 55)
 
-    if not result["success"]:
+    if any_failed:
         sys.exit(1)
 
 
