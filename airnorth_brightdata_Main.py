@@ -1259,18 +1259,13 @@ async def run_config(cfg: Config) -> None:
 
         await asyncio.gather(*tasks)
 
-        if stop_requested(cfg):
-            logging.info("Stopped before final export.")
-            return
-
-        await retry_failed_jobs(cfg, client, session=session)
+        if not stop_requested(cfg):
+            await retry_failed_jobs(cfg, client, session=session)
+        else:
+            logging.info("Brightdata stopped early — skipping retry, exporting partial results.")
     finally:
         if session:
             await session.close()
-
-    if stop_requested(cfg):
-        logging.info("Stopped before final export.")
-        return
 
     write_final_files(cfg)
 
