@@ -185,12 +185,15 @@ Each script:
 | Name | `cron-rex-78` |
 | Branch | `cron_rex_78` |
 | Runtime | `Python` |
-| Build Command | `pip install -r requirements.txt` |
+| Build Command | `pip install -r requirements.txt && playwright install chromium` |
 | Start Command | `python cron_rex.py` |
 | Schedule | *(set per timezone table below)* |
 
 **Routes:** PER→MJK, MJK→PER (2 routes — Perth ↔ Monkey Mia)  
-**Script:** `rex_per_mjk_Fixed_F19-05.py` — Selenium + Brightdata Scraping Browser (port 9515)
+**Script:** `Rex_per_mjk_Playwright_final.py` — Playwright + Brightdata Scraping Browser (CDP port 9222)  
+**Requirements:** `playwright>=1.40.0`, `openpyxl>=3.1.0`, `tzdata>=2024.1`
+
+> **Migrated from Selenium to Playwright.** The build command must include `playwright install chromium` to download the browser binary. The scraper connects via CDP WebSocket (port 9222), not Selenium (port 9515).
 
 **Environment Variables — add these in Render under Environment:**
 
@@ -201,20 +204,24 @@ Each script:
 | `EMAIL_PASSWORD` | `oxar pkne tppr dtys` |
 | `EMAIL_TO` | `ahteshamansari@bizprospex.com` |
 | `BD_BROWSER_HOST` | `brd.superproxy.io` |
-| `BD_BROWSER_SELENIUM_PORT` | `9515` |
+| `BD_SCRAPING_BROWSER_PORT` | `9222` |
+| `BD_BROWSER_USER` | `brd-customer-hl_fbc4a16a-zone-cont_rex` |
+| `BD_BROWSER_PASS` | `072res2p22t3` |
 | `BD_AUTH_TOKEN` | `7b1cdf1c-e4e0-4b6c-925b-0121031e6bf7` |
 | `BD_WEB_UNLOCKER_ZONE` | `cron_rex` |
 | `BD_UNLOCKER_COUNTRY` | `au` |
-| `BD_PER_MJK_USER` | `brd-customer-hl_fbc4a16a-zone-rex_root_8` |
-| `BD_PER_MJK_PASS` | `46yox0svep00` |
-| `BD_PER_MJK_SELENIUM_URL` | `https://brd-customer-hl_fbc4a16a-zone-rex_root_8:46yox0svep00@brd.superproxy.io:9515` |
-| `BD_MJK_PER_USER` | `brd-customer-hl_fbc4a16a-zone-rex_root_7` |
-| `BD_MJK_PER_PASS` | `iqeo716xnvw1` |
-| `BD_MJK_PER_SELENIUM_URL` | `https://brd-customer-hl_fbc4a16a-zone-rex_root_7:iqeo716xnvw1@brd.superproxy.io:9515` |
+| `REX_TIMEZONE` | `Australia/Perth` |
+| `REX_TOTAL_DAYS` | `84` |
+| `REX_OUTPUT_EXCEL` | `output/rex_per_mjk_results.xlsx` |
+| `REX_DEBUG_DIR` | `rex_debug` |
+| `REX_LOG_DIR` | `rex_logs` |
+| `REX_MAX_ATTEMPTS` | `3` |
+| `REX_PAGE_TIMEOUT` | `180` |
+| `REX_CAPTCHA_WAIT` | `90` |
 
-> `BD_PER_MJK_SELENIUM_URL` is used for PER→MJK (zone `rex_root_8`).  
-> `BD_MJK_PER_SELENIUM_URL` is used for MJK→PER (zone `rex_root_7`).  
-> The `_USER` / `_PASS` vars are optional — only needed if you want to override individual parts rather than the full URL.
+> All `REX_*` vars have sensible defaults — only override if you need to change behaviour (e.g. set `REX_TOTAL_DAYS=30` for a shorter run).  
+> `BD_BROWSER_USER` / `BD_BROWSER_PASS` are the Brightdata zone credentials — set these in the Render dashboard (do **not** hardcode in files).  
+> The scraper runs both PER→MJK and MJK→PER automatically when launched without a TTY (i.e. on Render).
 
 ---
 
@@ -315,26 +322,31 @@ All 5 crons share the same email and Python vars. Airnorth has its own Brightdat
 
 ---
 
-### Rex PER↔MJK (`cron_rex_78`) — Brightdata Selenium Browser (2 zones)
+### Rex PER↔MJK (`cron_rex_78`) — Brightdata Playwright CDP Browser
 
-Each route uses its own dedicated Brightdata zone:
+Migrated from Selenium to Playwright. Both routes share a single Brightdata zone via CDP (port 9222):
 
 | Variable | Value |
 |----------|-------|
 | `BD_BROWSER_HOST` | `brd.superproxy.io` |
-| `BD_BROWSER_SELENIUM_PORT` | `9515` |
+| `BD_SCRAPING_BROWSER_PORT` | `9222` |
+| `BD_BROWSER_USER` | `brd-customer-hl_fbc4a16a-zone-cont_rex` |
+| `BD_BROWSER_PASS` | `072res2p22t3` |
 | `BD_AUTH_TOKEN` | `7b1cdf1c-e4e0-4b6c-925b-0121031e6bf7` |
 | `BD_WEB_UNLOCKER_ZONE` | `cron_rex` |
 | `BD_UNLOCKER_COUNTRY` | `au` |
-| `BD_PER_MJK_USER` | `brd-customer-hl_fbc4a16a-zone-rex_root_8` |
-| `BD_PER_MJK_PASS` | `46yox0svep00` |
-| `BD_PER_MJK_SELENIUM_URL` | `https://brd-customer-hl_fbc4a16a-zone-rex_root_8:46yox0svep00@brd.superproxy.io:9515` |
-| `BD_MJK_PER_USER` | `brd-customer-hl_fbc4a16a-zone-rex_root_7` |
-| `BD_MJK_PER_PASS` | `iqeo716xnvw1` |
-| `BD_MJK_PER_SELENIUM_URL` | `https://brd-customer-hl_fbc4a16a-zone-rex_root_7:iqeo716xnvw1@brd.superproxy.io:9515` |
+| `REX_TIMEZONE` | `Australia/Perth` |
+| `REX_TOTAL_DAYS` | `84` |
+| `REX_OUTPUT_EXCEL` | `output/rex_per_mjk_results.xlsx` |
+| `REX_DEBUG_DIR` | `rex_debug` |
+| `REX_LOG_DIR` | `rex_logs` |
+| `REX_MAX_ATTEMPTS` | `3` |
+| `REX_PAGE_TIMEOUT` | `180` |
+| `REX_CAPTCHA_WAIT` | `90` |
 
-> PER→MJK connects via zone `rex_root_8`. MJK→PER connects via zone `rex_root_7`.  
-> This cron uses Selenium (not Playwright) — no CDP WSS connection needed.
+> Uses CDP WebSocket (port 9222) — **not** Selenium port 9515.  
+> Both routes (PER→MJK and MJK→PER) run sequentially within one process — no per-route zone needed.  
+> Set `BD_BROWSER_USER` and `BD_BROWSER_PASS` as secret env vars in the Render dashboard.
 
 ---
 
@@ -396,6 +408,58 @@ When you update a scraper script:
 3. Render auto-deploys on the next scheduled run (or click **Trigger Run** to test immediately)
 
 To update **all 5 crons** at once, make changes on `claude/zen-davinci-2848a8` then merge/rebase into each `cron/*` branch and push.
+
+---
+
+## render.yaml — Alternative to Manual Render Setup
+
+The `cron_rex_78` branch includes a `render.yaml` file. This is Render's **Infrastructure as Code** config — it lets you create the service automatically instead of filling in the Render dashboard by hand.
+
+### What render.yaml does
+
+```yaml
+services:
+  - type: worker          # runs as a background worker, not a web server
+    name: rex-per-mjk-scraper
+    runtime: python
+    buildCommand: pip install -r requirements.txt && playwright install chromium
+    startCommand: python Rex_per_mjk_Playwright_final.py --routes PER-MJK,MJK-PER --days 84 --resume
+    plan: starter
+    envVars: ...          # non-secret env vars pre-filled
+    disk: ...             # 1 GB persistent disk mounted at /data
+```
+
+> **Note:** `render.yaml` deploys the scraper as a **worker** (always-on process) rather than a cron job. The `--resume` flag makes repeated runs safe — it skips dates already scraped in the current day's output file.
+
+### How to use render.yaml
+
+**Option A — Render Blueprint (recommended for first-time setup):**
+
+1. Push the `cron_rex_78` branch to GitHub (already done)
+2. Go to [render.com](https://render.com) → **New** → **Blueprint**
+3. Connect your GitHub repo and select the `cron_rex_78` branch
+4. Render reads `render.yaml` and pre-fills all settings automatically
+5. Review, then click **Apply** — the service is created instantly
+6. Add the **secret** env vars manually in the dashboard (these are intentionally omitted from render.yaml):
+   - `BD_BROWSER_USER` — `brd-customer-hl_fbc4a16a-zone-cont_rex`
+   - `BD_BROWSER_PASS` — `072res2p22t3`
+   - `BD_AUTH_TOKEN` — `7b1cdf1c-e4e0-4b6c-925b-0121031e6bf7`
+   - `EMAIL_PASSWORD` — `oxar pkne tppr dtys`
+
+**Option B — Manual Cron Job (existing approach):**
+
+Ignore `render.yaml` and follow Steps 1–5 in this guide as normal. The file does not affect manual cron job creation.
+
+### render.yaml vs Cron Job
+
+| | render.yaml (Worker) | Manual Cron Job |
+|---|---|---|
+| Trigger | Runs once on deploy, then exits | Runs on a schedule (e.g. daily 7 AM) |
+| `--resume` flag | Skips already-scraped dates | Not needed (fresh run each time) |
+| Persistent disk | Yes — `/data` survives restarts | No — output emailed then lost |
+| Setup | One-click Blueprint | Manual dashboard steps |
+
+> If you want a **scheduled daily run**, use the Manual Cron Job approach (Steps 1–5). If you want to trigger a **one-off full 84-day scrape** on demand, the Blueprint/worker approach is faster.
 
 ---
 
