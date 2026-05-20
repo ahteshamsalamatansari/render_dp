@@ -36,7 +36,7 @@ RETRY_ERRORS  = ("Connection aborted.", "RemoteDisconnected")
 
 SCRAPER = {
     "name": "Nexus Airlines",
-    "command": ["python", "scrape_nexus_final.py"],
+    "command": ["python", "scrape_nexus_final_with_error_handling.py"],
     "routes": [
         "PER → GET (Perth → Geraldton)",
         "GET → PER (Geraldton → Perth)",
