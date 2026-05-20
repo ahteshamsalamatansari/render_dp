@@ -37,7 +37,8 @@ RETRY_ERRORS  = ("Connection aborted.", "RemoteDisconnected")
 SCRAPER = {
     "name": "Rex Airlines — PER↔MJK",
     "command": [
-        "python", "rex_per_mjk_Fixed_F19-05.py",
+        "python", "Rex_per_mjk_Playwright_final.py",
+        "--routes", "PER-MJK,MJK-PER",
         "--output", "output/rex_per_mjk_results.xlsx",
     ],
     "routes": [

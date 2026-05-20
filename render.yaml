@@ -1,0 +1,32 @@
+services:
+  - type: worker
+    name: rex-per-mjk-scraper
+    runtime: python
+    # Build: install packages + download Chromium browser binary
+    buildCommand: pip install -r requirements.txt && playwright install chromium
+    # Start: run both routes, 84 days, resume mode on so repeated cron runs skip completed dates
+    startCommand: python Rex_per_mjk_Playwright_final.py --routes PER-MJK,MJK-PER --days 84 --resume
+    plan: starter          # change to standard if you need more RAM/CPU
+    envVars:
+      - key: REX_TIMEZONE
+        value: Australia/Perth
+      - key: REX_TOTAL_DAYS
+        value: "84"
+      - key: REX_OUTPUT_EXCEL
+        value: /data/rex_per_mjk_results.xlsx   # persistent disk path
+      - key: REX_DEBUG_DIR
+        value: /data/rex_debug
+      - key: REX_LOG_DIR
+        value: /data/rex_logs
+      - key: BD_BROWSER_HOST
+        value: brd.superproxy.io
+      - key: BD_SCRAPING_BROWSER_PORT
+        value: "9222"
+      # Sensitive credentials — set these in Render Dashboard, NOT here
+      # - key: BD_BROWSER_USER
+      # - key: BD_BROWSER_PASS
+      # - key: BD_AUTH_TOKEN
+    disk:
+      name: rex-data
+      mountPath: /data
+      sizeGB: 1             # 1GB enough for Excel + debug screenshots + logs
