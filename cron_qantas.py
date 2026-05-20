@@ -161,7 +161,7 @@ def run_single_route(route_num: int, origin: str, dest: str,
     Kills the process if no stdout line appears for ROUTE_STALL_S seconds.
     Returns (success, full_output_text).
     """
-    cmd = ["python", "Qantas_4Zones_Deliver_13_05_2026_FixedU.py", "--route", str(route_num)]
+    cmd = ["python", "qantas_playwright_scraper.py", "--route", str(route_num)]
     run_env = (env if env is not None else os.environ).copy()
     run_env["PYTHONUNBUFFERED"] = "1"
     run_env["TZ"] = "Australia/Perth"
