@@ -754,27 +754,46 @@ async def click_next_arrow(page):
     """Click on the calendar next button to load the next block of dates."""
     try:
         clicked = await page.evaluate("""() => {
-            let btn = Array.from(document.querySelectorAll('a, button')).find(b => {
+            let btn = null;
+
+            // Strategy 1: text includes 'next' + ('day' or '14')
+            btn = Array.from(document.querySelectorAll('a, button')).find(b => {
                 let txt = (b.innerText || '').toLowerCase().trim();
                 return txt.includes('next') && (txt.includes('day') || txt.includes('14'));
             });
+
+            // Strategy 2: aria-label or class name contains 'next'
             if (!btn) {
-                btn = Array.from(document.querySelectorAll('button')).find(b => {
+                btn = Array.from(document.querySelectorAll('button, a')).find(b => {
                     let lbl = (b.getAttribute('aria-label') || '').toLowerCase();
                     let cls = (b.className || '').toLowerCase();
                     return lbl.includes('next') || cls.includes('next-btn')
                         || cls.includes('nextbutton') || cls.includes('next-button');
                 });
             }
+
+            // Strategy 3: last visible button inside any known ribbon/calendar container
             if (!btn) {
-                let ribbon = document.querySelector('.flex-linear-calendar, .date-ribbon, [class*="linearCalendar"], [class*="dateRibbon"]');
+                let ribbon = document.querySelector(
+                    '.flex-linear-calendar, .date-ribbon, [class*="linearCalendar"], [class*="dateRibbon"], [class*="calendarNav"]'
+                );
                 if (ribbon) {
                     let btns = Array.from(ribbon.querySelectorAll('button, a')).filter(b => b.offsetParent !== null);
                     if (btns.length) btn = btns[btns.length - 1];
                 }
             }
+
+            // Strategy 4: any visible button in the right 30% of the viewport (navigation arrow)
+            if (!btn) {
+                let candidates = Array.from(document.querySelectorAll('button, a[role="button"]')).filter(b => {
+                    let r = b.getBoundingClientRect();
+                    return r.width > 0 && r.height > 0 && r.right > window.innerWidth * 0.7 && r.top < window.innerHeight;
+                });
+                if (candidates.length) btn = candidates[candidates.length - 1];
+            }
+
             if (btn) {
-                btn.scrollIntoView({block: 'center'});
+                btn.scrollIntoView({block: 'center', inline: 'nearest'});
                 btn.click();
                 return true;
             }
@@ -1024,14 +1043,14 @@ async def scrape_route(origin, dest, today):
                     if no_new_streak >= 3:
                         print("Reached maximum tab streak without progress. Finishing.")
                         break
-                        
+
                     arrow_clicked = await click_next_arrow(page)
                     if arrow_clicked:
-                        print("Clicked Next Calendar Arrow...")
-                        await asyncio.sleep(4)
+                        print("    Clicked Next Calendar Arrow...")
+                        await asyncio.sleep(6)
                     else:
-                        print("Could not click next arrow.")
-                        break
+                        print(f"    [WARN] Could not click next arrow (streak {no_new_streak}), will retry...")
+                        await asyncio.sleep(4)
                     continue
                 
                 no_new_streak = 0
@@ -1089,7 +1108,7 @@ async def scrape_route(origin, dest, today):
                 
                 if len(collected_dates) < DAYS_OUT:
                     await click_next_arrow(page)
-                    await asyncio.sleep(4)
+                    await asyncio.sleep(6)
 
             # Final Save
             save_route(all_rows, origin, dest, today)
@@ -1196,15 +1215,15 @@ async def main():
     failed_routes = []
     for origin, dest in routes:
         try:
-            print(f"\n[RUN] Starting scrape for {origin} -> {dest} (Max limit: 5 minutes)...")
-            # Enforce a 5-minute strict timeout per route to prevent infinite hangs and resource waste on Cron Job
-            await asyncio.wait_for(scrape_route(origin, dest, today), timeout=300.0)
+            print(f"\n[RUN] Starting scrape for {origin} -> {dest} (Max limit: 20 minutes)...")
+            # 20-minute timeout per route: 84 dates × ~6s each ≈ 9 min, plus navigation/save overhead
+            await asyncio.wait_for(scrape_route(origin, dest, today), timeout=1200.0)
             
             if len(routes) > 1:
                 print("\n[WAIT] Waiting 20 seconds before starting next route to avoid IP block/rate limits...")
                 await asyncio.sleep(20)
         except asyncio.TimeoutError:
-            print(f"\n[TIMEOUT] Route {origin} -> {dest} exceeded the 5-minute execution limit. Skipping to the next route...")
+            print(f"\n[TIMEOUT] Route {origin} -> {dest} exceeded the 20-minute execution limit. Skipping to the next route...")
             failed_routes.append(f"{origin}->{dest} (Timeout)")
         except Exception as err:
             print(f"\n[FAIL] Route {origin} -> {dest} failed execution: {err}")
