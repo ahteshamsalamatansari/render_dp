@@ -18,6 +18,7 @@ import asyncio
 import os
 import re
 import sys
+import time
 import argparse
 import json
 import random
@@ -28,7 +29,7 @@ from dataclasses import dataclass, field as dc_field
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-from playwright.async_api import async_playwright
+from playwright.async_api import async_playwright, Browser
 from openpyxl import load_workbook, Workbook
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -154,6 +155,9 @@ RUN_ID = os.getenv("REX_RUN_ID", datetime.now(REX_TZ).strftime("%Y%m%d"))
 MAX_ATTEMPTS = int(os.getenv("REX_MAX_ATTEMPTS", "3"))
 FINAL_RETRY_ROUNDS = int(os.getenv("REX_FINAL_RETRY_ROUNDS", "1"))
 RETRY_BACKOFF_SECONDS = float(os.getenv("REX_RETRY_BACKOFF_SECONDS", "8"))
+# Pause (seconds) between routes so Bright Data can rotate to a fresh IP.
+# A fresh IP avoids hitting Rex's reCAPTCHA quota that was exhausted by the previous route.
+INTER_ROUTE_DELAY_SECONDS = int(os.getenv("REX_INTER_ROUTE_DELAY_SECONDS", "30"))
 MAX_RETRY_BACKOFF_SECONDS = float(os.getenv("REX_MAX_RETRY_BACKOFF_SECONDS", "90"))
 JOB_TIMEOUT_SECONDS = int(os.getenv("REX_JOB_TIMEOUT_SECONDS", "240"))
 NAVIGATION_MODE = os.getenv("REX_NAVIGATION_MODE", "ribbon").lower()
@@ -524,6 +528,20 @@ class OutputStore:
     def job_has_any_row(self, origin: str, dest: str, date_str: str) -> bool:
         return bool(self.job_rows(origin, dest, date_str))
 
+    def failed_route_dates(self, origin: str, dest: str, date_strs: list[str]) -> list[str]:
+        """Return the subset of date_strs that have retryable failure rows (not completed)."""
+        failed = []
+        for date_str in date_strs:
+            if self.job_completed(origin, dest, date_str):
+                continue                    # already SUCCESS / NO_FARE — skip
+            rows = self.job_rows(origin, dest, date_str)
+            if not rows:
+                continue                    # never written yet — main run handles it
+            statuses = {(row.get("Status") or "") for row in rows}
+            if statuses & RETRYABLE_FAILURE_STATUSES:
+                failed.append(date_str)
+        return failed
+
 
 OUTPUT_STORE: OutputStore | None = None
 
@@ -661,6 +679,9 @@ class RexScraper:
         self.captcha_disabled_threshold = max(1, captcha_disabled_threshold)
         self.captcha_recovery_max = max(0, captcha_recovery_max)
         self.captcha_recovery_strategy = (captcha_recovery_strategy or "refill-then-new-context").lower()
+        # Bright Data playwright instance — stored so _new_job_context can
+        # reconnect transparently when the browser session is killed.
+        self._pw_instance = None
         if self.captcha_recovery_strategy not in CAPTCHA_RECOVERY_STRATEGIES:
             print(
                 f"⚠️  Unknown captcha recovery strategy {self.captcha_recovery_strategy!r}; "
@@ -880,14 +901,45 @@ class RexScraper:
 
         return False
 
-    async def wait_for_brightdata_captcha(self, page, detect_timeout: int = 60000):
+    async def wait_for_brightdata_captcha(self, page, detect_timeout: int = 60000) -> str:
+        """
+        Ask Bright Data's Scraping Browser to solve any captcha on the current page.
+
+        Returns one of three string values:
+          "solved"     — captcha was solved successfully ("solved" or "solve_finished" status).
+                         Continue button should be enabled; page will proceed.
+          "failed"     — Bright Data returned a hard failure ("invalid" or "solve_failed").
+                         Rex's reCAPTCHA quota is exhausted for this IP; caller should
+                         fast-exit rather than keep looping.
+          "not_solved" — captcha not detected, timed out, or unknown; caller may still
+                         attempt force-enable as a fallback.
+        """
         try:
             client = await page.context.new_cdp_session(page)
-            await client.send("Captcha.waitForSolve", {"detectTimeout": detect_timeout})
-            print("   ✅ Bright Data captcha solve step completed")
-            return True
-        except Exception:
-            return False
+            result = await client.send("Captcha.waitForSolve", {"detectTimeout": detect_timeout})
+            # Observed statuses from Bright Data Scraping Browser:
+            #   "solved"       — captcha widget solved, token injected
+            #   "solve_finished" — Bright Data completed a solve (functionally identical to "solved")
+            #   "not_detected" — no captcha widget found on the page
+            #   "solve_failed" — Bright Data attempted but failed
+            #   "invalid"      — Rex server rejected the captcha token (quota exhausted)
+            #   "timeout"      — detectTimeout elapsed with no solve
+            status = (result or {}).get("status", "unknown") if isinstance(result, dict) else "unknown"
+            if status in ("solved", "solve_finished"):
+                print(f"   ✅ Bright Data captcha solved successfully (status={status!r})")
+                return "solved"
+            elif status in ("solve_failed", "invalid"):
+                print(
+                    f"   ❌ Bright Data captcha hard-failed (status={status!r}) — "
+                    "reCAPTCHA quota likely exhausted for this IP"
+                )
+                return "failed"
+            else:
+                print(f"   ⚠️  Bright Data captcha status: {status!r} — not solved")
+                return "not_solved"
+        except Exception as exc:
+            print(f"   ⚠️  Bright Data captcha wait exception: {exc}")
+            return "not_solved"
 
     async def page_looks_like_cloudflare_or_challenge(self, page) -> bool:
         try:
@@ -1372,6 +1424,16 @@ class RexScraper:
         structure_seen = False
         verification_seen = False
         verification_disabled_loops = 0
+        # Tracks total verification page encounters regardless of click outcome.
+        # Force-enable makes click_rex_verification_continue return True even when
+        # the real captcha was never solved, so verification_disabled_loops (which
+        # resets on True) never accumulates.  This counter never resets and provides
+        # the actual infinite-loop guard.
+        total_verification_loops = 0
+        max_total_verification = max(
+            self.captcha_disabled_threshold * 3,
+            int(os.getenv("REX_MAX_VERIFICATION_LOOPS", "12")),
+        )
 
         while loop.time() < deadline:
             try:
@@ -1384,12 +1446,48 @@ class RexScraper:
                                      "Rex returned an ASP.NET/server error", retryable=True)
 
             if await self.page_has_rex_verification_page(page):
+                total_verification_loops += 1
                 verification_seen = True
-                print("   🧩 Rex verification page detected; waiting for Bright Data captcha solver...")
+
+                if total_verification_loops > max_total_verification:
+                    return SearchOutcome(
+                        False,
+                        STATUS_BLOCKED,
+                        (
+                            f"Rex verification page persisted across {total_verification_loops} loops "
+                            "(reCAPTCHA quota exceeded — force-enable clicks not accepted by server)"
+                        ),
+                        retryable=True,
+                    )
+
+                print(
+                    f"   🧩 Rex verification page detected (loop {total_verification_loops}/{max_total_verification}); "
+                    "waiting for Bright Data captcha solver..."
+                )
                 remaining_seconds = max(1.0, deadline - loop.time())
                 solver_timeout = int(min(30000, max(8000, remaining_seconds * 1000)))
                 click_timeout = int(min(10000, max(3000, remaining_seconds * 1000)))
-                await self.wait_for_brightdata_captcha(page, detect_timeout=solver_timeout)
+                captcha_status = await self.wait_for_brightdata_captcha(page, detect_timeout=solver_timeout)
+                if captcha_status == "failed":
+                    # Bright Data returned invalid/solve_failed — Rex's reCAPTCHA quota is
+                    # exhausted for this IP.  Continuing to loop will just waste the remaining
+                    # time budget (each loop ≈ 10–30 s) before hitting the hard 240 s timeout.
+                    # Bail now so the outer retry can attempt a different approach / IP.
+                    return SearchOutcome(
+                        False,
+                        STATUS_BLOCKED,
+                        (
+                            f"Rex reCAPTCHA hard-failed (invalid/solve_failed) on loop "
+                            f"{total_verification_loops}/{max_total_verification} — "
+                            "reCAPTCHA quota exhausted for this Bright Data IP"
+                        ),
+                        retryable=True,
+                    )
+                if captcha_status != "solved":
+                    # not_detected / timeout / unknown — button won't be enabled by the
+                    # normal captcha path; jump straight to force-enable inside
+                    # click_rex_verification_continue.
+                    print("   ⚡ Captcha not solved by Bright Data — using force-enable path directly")
                 if await self.click_rex_verification_continue(page, timeout=click_timeout):
                     verification_disabled_loops = 0
                     try:
@@ -2037,16 +2135,66 @@ class RexScraper:
         jitter = random.uniform(0.0, min(3.0, self.retry_backoff))
         return min(self.max_retry_backoff, self.retry_backoff * (2 ** max(0, attempt - 1)) + jitter)
 
+    # Keywords that indicate the Bright Data WebSocket session has been dropped.
+    _BROWSER_CLOSED_MARKERS = (
+        "target page, context or browser has been closed",
+        "browser has been closed",
+        "connection closed",
+        "websocket",
+        "target closed",
+    )
+
+    def _is_browser_closed_error(self, exc: Exception) -> bool:
+        msg = str(exc).lower()
+        return any(marker in msg for marker in self._BROWSER_CLOSED_MARKERS)
+
+    async def _reconnect_browser(self) -> Browser | None:
+        """
+        Re-establish the Bright Data CDP connection when the current browser
+        session has been killed (e.g. after a prolonged CAPTCHA storm).
+        Returns the new browser object, or None on failure.
+        """
+        if not self._pw_instance:
+            print("   ❌ Cannot reconnect — playwright instance not stored (run_route must set self._pw_instance)")
+            return None
+        print("   🔌 Browser session dead — attempting reconnect to Bright Data...")
+        for attempt in range(1, 4):
+            try:
+                new_browser = await self._pw_instance.chromium.connect_over_cdp(BD_BROWSER_WSS)
+                print(f"   ✅ Bright Data reconnected (attempt {attempt}/3)")
+                return new_browser
+            except Exception as exc:
+                print(f"   ⚠️  Reconnect attempt {attempt}/3 failed: {exc}")
+                if attempt < 3:
+                    await asyncio.sleep(8 * attempt)
+        print("   ❌ All reconnect attempts exhausted — browser unavailable")
+        return None
+
     async def _new_job_context(self, browser):
-        context = await browser.new_context(
-            viewport={"width": 1366, "height": 900},
-            timezone_id=REX_TIMEZONE,
-            locale=REX_LOCALE,
-        )
-        context.set_default_timeout(30000)
-        context.set_default_navigation_timeout(70000)
-        page = await context.new_page()
-        return context, page
+        """
+        Create a new browser context + page.
+        If the browser session has been killed by Bright Data, transparently
+        reconnect up to 2 times before raising.
+        """
+        effective_browser = browser
+        for reconnect_no in range(3):  # 0 = original, 1 = first reconnect, 2 = second
+            try:
+                context = await effective_browser.new_context(
+                    viewport={"width": 1366, "height": 900},
+                    timezone_id=REX_TIMEZONE,
+                    locale=REX_LOCALE,
+                )
+                context.set_default_timeout(30000)
+                context.set_default_navigation_timeout(70000)
+                page = await context.new_page()
+                return context, page
+            except Exception as exc:
+                if reconnect_no < 2 and self._is_browser_closed_error(exc):
+                    new_browser = await self._reconnect_browser()
+                    if new_browser:
+                        effective_browser = new_browser
+                        continue
+                raise
 
     async def scrape_date_once(self, page, origin_code: str, dest_code: str,
                                target_dt: datetime, attempt: int) -> JobResult:
@@ -2471,6 +2619,9 @@ class RexScraper:
         """Create a context and setup the route/date, retrying stuck captcha contexts."""
         last_outcome: SearchOutcome | None = None
         date_str = output_date(initial_dt)
+        # Track which browser we're using — may be swapped for a fresh Bright Data
+        # connection if captcha quota is exhausted on the current IP.
+        effective_browser = browser
 
         for attempt in range(1, self.max_attempts + 1):
             context = None
@@ -2480,7 +2631,7 @@ class RexScraper:
                 f"for {origin_code}->{dest_code} {date_str}"
             )
             try:
-                context, page = await self._new_job_context(browser)
+                context, page = await self._new_job_context(effective_browser)
                 setup = await asyncio.wait_for(
                     self.setup_route_page_once(page, origin_code, dest_code, initial_dt),
                     timeout=self.job_timeout,
@@ -2556,6 +2707,19 @@ class RexScraper:
 
             await self._close_context_safely(context, "failed route setup context")
             if attempt < self.max_attempts:
+                # If captcha quota is exhausted, reconnect to Bright Data so the next
+                # attempt gets a fresh IP with a clean reCAPTCHA quota.
+                if last_outcome and last_outcome.status == STATUS_BLOCKED:
+                    print(
+                        f"   🔄 Captcha quota exhausted on attempt {attempt} — "
+                        "reconnecting Bright Data for a fresh IP..."
+                    )
+                    new_browser = await self._reconnect_browser()
+                    if new_browser:
+                        effective_browser = new_browser
+                        print("   ✅ Fresh Bright Data session — next attempt will use new IP")
+                    else:
+                        print("   ⚠️  Reconnect failed — retrying with same browser")
                 delay = self._backoff_delay(attempt)
                 if delay > 0:
                     print(f"   ⏳ Backing off {delay:.1f}s before route setup retry")
@@ -3171,6 +3335,85 @@ class RexScraper:
         if missing:
             print(f"   🚨 Completeness guard added {len(missing)} missing route/date row(s).")
 
+    async def _run_cleanup_retry_pass(
+        self,
+        browser,
+        origin_code: str,
+        dest_code: str,
+        dates: list[datetime],
+    ):
+        """
+        After the main run (ribbon or fresh-search) finishes, scan OUTPUT_STORE for any
+        dates that still have retryable failure rows (BLOCKED / TIMEOUT / FAILED etc.)
+        and retry them with a freshly connected Bright Data session.
+
+        This is the key safety net: even if reCAPTCHA quota was exhausted for the
+        original browser session, reconnecting gives a new IP and a second chance.
+        """
+        if not OUTPUT_STORE:
+            return
+
+        date_strs_all = [output_date(dt) for dt in dates]
+        failed_strs = OUTPUT_STORE.failed_route_dates(origin_code, dest_code, date_strs_all)
+        if not failed_strs:
+            print(f"\n   ✅ Cleanup pass: all {len(dates)} dates completed — no retries needed.")
+            return
+
+        failed_set = set(failed_strs)
+        failed_dates = [dt for dt in dates if output_date(dt) in failed_set]
+
+        print(f"\n{'─'*60}")
+        print(
+            f"🔄 Cleanup retry pass: {len(failed_dates)} date(s) still failed for "
+            f"{origin_code}→{dest_code}"
+        )
+        print(f"   Dates: {', '.join(failed_strs[:10])}{'...' if len(failed_strs) > 10 else ''}")
+        print(f"{'─'*60}")
+
+        # Reconnect to Bright Data — new connection = potential new IP = fresh quota.
+        # Even a brief pause before reconnecting helps the pool rotate.
+        print("   🔌 Reconnecting to Bright Data for fresh IP (cleanup pass)...")
+        await asyncio.sleep(5)
+        cleanup_browser = await self._reconnect_browser()
+        effective_browser = cleanup_browser if cleanup_browser else browser
+
+        succeeded = 0
+        still_failed = 0
+        for target_dt in failed_dates:
+            date_str = output_date(target_dt)
+            if OUTPUT_STORE.job_completed(origin_code, dest_code, date_str):
+                print(f"   ↩️  {date_str}: completed since scan — skipping.")
+                continue
+
+            print(f"\n   🔁 Cleanup retry: {origin_code}→{dest_code} {date_str}")
+            try:
+                result = await self.scrape_job_with_retries(
+                    effective_browser, origin_code, dest_code, target_dt
+                )
+            except Exception as exc:
+                print(f"   ❌ Cleanup retry exception for {date_str}: {exc}")
+                result = JobResult(
+                    STATUS_FAILED,
+                    [],
+                    f"Cleanup retry exception: {exc}",
+                    retryable=True,
+                )
+
+            self._write_result(origin_code, dest_code, date_str, result)
+            if result.completed:
+                print(f"   ✅ Cleanup retry succeeded: {date_str} ({result.status})")
+                succeeded += 1
+            else:
+                print(f"   ❌ Cleanup retry still failed: {date_str} — {result.status}: {result.comment}")
+                still_failed += 1
+                # If blocked again, reconnect for the next date to try a different IP
+                if result.status == STATUS_BLOCKED:
+                    new_browser = await self._reconnect_browser()
+                    if new_browser:
+                        effective_browser = new_browser
+
+        print(f"\n   📋 Cleanup pass done: {succeeded} recovered, {still_failed} still failed.")
+
     async def run_route(self, origin_code, dest_code):
         origin_name = AIRPORT_MAP.get(origin_code, origin_code)
         dest_name   = AIRPORT_MAP.get(dest_code, dest_code)
@@ -3194,6 +3437,7 @@ class RexScraper:
         print(f"{'█'*60}")
 
         async with async_playwright() as p:
+            self._pw_instance = p   # stored so _new_job_context can reconnect on session drop
             print("🔌 Connecting to Bright Data Browser API...")
             browser = None
             try:
@@ -3237,6 +3481,15 @@ class RexScraper:
                                     retryable=True,
                                 ),
                             )
+            else:
+                # Main run completed without exception — run cleanup pass to recover
+                # any dates still showing retryable failures (e.g. captcha-blocked).
+                try:
+                    await self._run_cleanup_retry_pass(browser, origin_code, dest_code, dates)
+                except KeyboardInterrupt:
+                    print("\n⛔ Cleanup pass interrupted.")
+                except Exception as exc:
+                    print(f"\n⚠️  Cleanup pass encountered an error (non-fatal): {exc}")
             finally:
                 if browser:
                     await browser.close()
@@ -3329,6 +3582,13 @@ def parse_args():
         help="ribbon is default: select route once, then move dates via Rex ribbon; fresh reselects route/date per job",
     )
     parser.add_argument("--no-resume", action="store_true", help="Do not skip route/date jobs already completed for this run id")
+    parser.add_argument(
+        "--inter-route-delay",
+        type=int,
+        default=INTER_ROUTE_DELAY_SECONDS,
+        metavar="SECS",
+        help="Seconds to pause between routes so Bright Data can rotate to a fresh IP (default: 30)",
+    )
     parser.add_argument("--list", action="store_true", help="Show supported routes")
     parser.add_argument("--skip-unblocker-check", action="store_true")
     return parser.parse_args()
@@ -3429,6 +3689,7 @@ if __name__ == "__main__":
     CAPTCHA_RECOVERY_STRATEGY = ns.captcha_recovery_strategy
     NAVIGATION_MODE = ns.navigation_mode
     RESUME_ENABLED = not ns.no_resume
+    INTER_ROUTE_DELAY_SECONDS = max(0, ns.inter_route_delay)
 
     log_fh = configure_run_logging(LOG_DIR, RUN_ID)
     OUTPUT_STORE = OutputStore(OUTPUT_EXCEL, RUN_ID)
@@ -3470,7 +3731,7 @@ if __name__ == "__main__":
     route_status: dict[tuple[str, str], str] = {}
 
     try:
-        for origin, dest in routes_to_run:
+        for route_idx, (origin, dest) in enumerate(routes_to_run):
             try:
                 asyncio.run(scraper.run_route(origin, dest))
                 route_status[(origin, dest)] = "ok"
@@ -3481,6 +3742,16 @@ if __name__ == "__main__":
             except Exception as exc:
                 route_status[(origin, dest)] = f"ERROR: {type(exc).__name__}: {exc}"
                 print(f"\n❌ Route {origin}→{dest} failed: {type(exc).__name__}: {exc}")
+
+            # Inter-route delay: pause so Bright Data can rotate to a fresh IP before
+            # the next route opens a new browser session.  Helps avoid reCAPTCHA quota
+            # exhaustion carrying over from one route to the next.
+            if route_idx < len(routes_to_run) - 1 and INTER_ROUTE_DELAY_SECONDS > 0:
+                print(
+                    f"\n⏸️  Inter-route cooldown: {INTER_ROUTE_DELAY_SECONDS}s "
+                    "(letting Bright Data IP pool rotate before next route)..."
+                )
+                time.sleep(INTER_ROUTE_DELAY_SECONDS)
     finally:
         # ── FINAL STATUS TABLE ───────────────────────────────────
         print("\n" + "═" * 60)
