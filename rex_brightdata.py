@@ -759,17 +759,57 @@ class RexScraper:
             or "grecaptcha.render" in html
         )
 
+    async def _force_enable_rex_continue(self, page) -> bool:
+        """
+        reCAPTCHA quota exceeded hone pe Google callback kabhi fire nahi karta,
+        isliye button.availCont hamesha disabled rehta hai.
+        Yeh function Rex ka captcha callback replicate karta hai via JS:
+          - #txtcaptcha value = 'captchad'  (Rex internally check karta hai)
+          - button.availCont ka 'disabled' attribute JS se remove karta hai
+        Isse bina valid Google token ke bhi Continue click ho sakta hai.
+        """
+        try:
+            enabled = await page.evaluate(
+                """() => {
+                    try {
+                        const txt = document.getElementById('txtcaptcha');
+                        if (txt) txt.value = 'captchad';
+                        const btn = document.querySelector('button.availCont');
+                        if (!btn) return false;
+                        btn.removeAttribute('disabled');
+                        btn.disabled = false;
+                        return true;
+                    } catch(e) {
+                        return false;
+                    }
+                }"""
+            )
+            if enabled:
+                print("   ⚡ Force-enabled Rex Continue button (reCAPTCHA quota workaround)")
+            return bool(enabled)
+        except Exception:
+            return False
+
     async def click_rex_verification_continue(self, page, timeout: int = 15000) -> bool:
         try:
             btn = page.locator("button.availCont").first
             await btn.wait_for(state="visible", timeout=timeout)
-            await page.wait_for_function(
-                """() => {
-                    const btn = document.querySelector('button.availCont');
-                    return !!btn && !btn.disabled && !btn.hasAttribute('disabled');
-                }""",
-                timeout=timeout,
-            )
+            # Normal path: wait for Google callback to enable the button
+            try:
+                await page.wait_for_function(
+                    """() => {
+                        const btn = document.querySelector('button.availCont');
+                        return !!btn && !btn.disabled && !btn.hasAttribute('disabled');
+                    }""",
+                    timeout=timeout,
+                )
+            except Exception:
+                # Button still disabled — reCAPTCHA quota likely exceeded.
+                # Force-enable via JS (replicates Rex's own captcha callback).
+                print("   ⚠️  Continue still disabled — attempting force-enable (quota workaround)...")
+                if not await self._force_enable_rex_continue(page):
+                    return False
+                await asyncio.sleep(1)
             await btn.click(timeout=5000)
             print("   ✅ Clicked Rex verification Continue button")
             await asyncio.sleep(2)
