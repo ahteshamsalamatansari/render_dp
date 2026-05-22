@@ -60,6 +60,13 @@ ROUTES = [
     ("KNX", "BME"),
 ]
 
+# Full airport display names required by Airnorth's booking engine
+AIRPORT_NAMES = {
+    "BME": "Broome",
+    "KNX": "Kununurra",
+    "DRW": "Darwin",
+}
+
 AIRLINE = "Airnorth"
 SOURCE = "airnorth.com.au"
 BASE_URL = "https://secure.airnorth.com.au/ibe/availability"
@@ -268,12 +275,34 @@ def brightdata_auth_header(token: str) -> str:
     return f"Bearer {token}"
 
 
+BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/148.0.0.0 Safari/537.36 Edg/148.0.0.0"
+    ),
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;"
+        "q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"
+    ),
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Cache-Control": "max-age=0",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+}
+
+
 def brightdata_request_sync(client: BrightDataClient, url: str) -> str:
     payload = {
         "zone": client.zone,
         "url": url,
         "format": client.response_format,
         "method": "GET",
+        "headers": BROWSER_HEADERS,
     }
     if client.country:
         payload["country"] = client.country
@@ -316,6 +345,7 @@ async def brightdata_request_async(session, client: BrightDataClient, url: str) 
         "url": url,
         "format": client.response_format,
         "method": "GET",
+        "headers": BROWSER_HEADERS,
     }
     if client.country:
         payload["country"] = client.country
@@ -744,12 +774,17 @@ def write_final_files(cfg: Config) -> None:
 # ══════════════════════════════════════════════════════
 
 def build_url(job: Job) -> str:
+    origin_name = AIRPORT_NAMES.get(job.origin, job.origin)
+    dest_name   = AIRPORT_NAMES.get(job.destination, job.destination)
     return (
         f"{BASE_URL}?tripType=ONE_WAY"
+        f"&search_departing={origin_name}"
         f"&depPort={job.origin}"
+        f"&search_arriving={dest_name}"
         f"&arrPort={job.destination}"
         f"&departureDate={job.departure_date.strftime('%d.%m.%Y')}"
         f"&adult=1&child=0&infant=0"
+        f"&lang=en&promoCode=&assist=No"
     )
 
 
