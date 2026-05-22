@@ -580,7 +580,16 @@ def append_rows(rows: list):
 # ─────────────────────────────────────────────────────────────
 
 def extract_price_from_card_text(card_text: str) -> str:
-    return _extract_price_patterns(card_text)
+    m = re.search(r'[Ff]rom\s*\$\s*([\d,]+\.\d{2})', card_text)
+    if m:
+        return f"${m.group(1)}"
+    m = re.search(r'\$\s*([\d,]+\.\d{2})', card_text)
+    if m:
+        return f"${m.group(1)}"
+    m = re.search(r'\$\s*(\d[\d,]*)', card_text)
+    if m:
+        return f"${_ensure_cents(m.group(1))}"
+    return "N/A"
 
 
 def find_ribbon_end_position(full_body: str) -> int:
@@ -615,9 +624,22 @@ def extract_price_from_flight_window(full_body: str, flight_match,
     after_end   = min(len(full_body), after_start + 600)
     window      = full_body[after_start:after_end]
 
-    price = _extract_price_patterns(window)
-    if price != "N/A":
-        return price
+    m = re.search(r'[Ff]rom\s*\$\s*([\d,]+\.\d{2})', window)
+    if m:
+        return f"${m.group(1)}"
+
+    m = re.search(r'[Ss]elect\s+[Ff]ares?\s*\$\s*([\d,]+\.\d{2})', window)
+    if m:
+        return f"${m.group(1)}"
+
+    decimals = re.findall(r'\$\s*([\d,]+\.\d{2})', window)
+    if decimals:
+        return f"${decimals[0]}"
+
+    m = re.search(r'\$\s*(\d[\d,]*)', window)
+    if m:
+        return f"${_ensure_cents(m.group(1))}"
+
     return "N/A"
 
 
