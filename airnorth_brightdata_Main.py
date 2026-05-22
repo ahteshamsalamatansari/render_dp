@@ -109,6 +109,13 @@ BRIGHTDATA_REQUEST_TIMEOUT_S = float(os.getenv("BRIGHTDATA_REQUEST_TIMEOUT_S", "
 BRIGHTDATA_RETRY_DELAY_BASE_S = float(os.getenv("BRIGHTDATA_RETRY_DELAY_BASE_S", "0.5"))
 BRIGHTDATA_RETRY_DELAY_MAX_S = float(os.getenv("BRIGHTDATA_RETRY_DELAY_MAX_S", "2.0"))
 WORKER_SAFETY_CAP = int(os.getenv("AIRNORTH_WORKER_SAFETY_CAP", "30"))
+# How many distinct worker-level Brightdata failures before declaring a fatal outage.
+# A value of 1 means any single timeout kills the run (old behaviour). 2+ is safer.
+BRIGHTDATA_FATAL_THRESHOLD = int(os.getenv("BRIGHTDATA_FATAL_THRESHOLD", "2"))
+# Retry passes after the main run. Each pass waits longer and uses fewer workers.
+MAX_RETRY_PASSES = int(os.getenv("AIRNORTH_MAX_RETRY_PASSES", "3"))
+RETRY_PASS_DELAY_S  = [30, 60, 120]   # seconds to wait before each retry pass
+RETRY_PASS_WORKERS  = [4, 2, 1]       # workers per retry pass
 
 
 # ══════════════════════════════════════════════════════
@@ -525,100 +532,105 @@ def read_failed_jobs(error_jsonl: Path, completed_keys: set[str]) -> list[Job]:
 async def retry_failed_jobs(
     cfg: Config,
     client: BrightDataClient,
+    all_jobs: list,
     session=None,
 ) -> None:
     """
-    Retry only failed Airnorth route/date jobs once in calm mode.
+    Multi-pass retry loop that guarantees every date is captured.
 
-    Normal run stays fast. Failed jobs get one more pass with:
-      - 1 worker
-      - 3 retries
-      - slower delay
-      - separate retry error JSONL
+    After the main run, this compares the full job list against raw_jsonl
+    (the source of truth for successes) and retries anything not yet captured —
+    regardless of how it was labelled (FAILED, CANCELLED, or never recorded).
 
-    Successful retry results are appended to the same raw_jsonl, so final
-    CSV/XLSX includes recovered dates without duplicates.
+    Each pass uses fewer workers and a longer delay to ride out transient
+    Brightdata issues. A fresh fatal_stop is created per pass so a previous
+    outage does not block recovery.
     """
-    if stop_requested(cfg):
-        logging.info("Stop requested. Skipping failed-job retry phase.")
-        return
+    for pass_num in range(MAX_RETRY_PASSES):
+        completed = read_completed_keys(cfg.raw_jsonl)
+        pending = [job for job in all_jobs if job.key not in completed]
 
-    completed_before = read_completed_keys(cfg.raw_jsonl)
-    failed_jobs = read_failed_jobs(cfg.error_jsonl, completed_before)
+        if not pending:
+            logging.info("All %s jobs captured successfully.", len(all_jobs))
+            return
 
-    if not failed_jobs:
-        logging.info("Normal run completed. No failed jobs to retry.")
-        return
+        delay   = RETRY_PASS_DELAY_S[pass_num]  if pass_num < len(RETRY_PASS_DELAY_S)  else 120
+        workers = RETRY_PASS_WORKERS[pass_num]   if pass_num < len(RETRY_PASS_WORKERS)  else 1
 
-    run_id = cfg.run_dir.name.replace("airnorth_", "")
-    retry_error_jsonl = cfg.run_dir / f"airnorth_retry_errors_{run_id}.jsonl"
+        logging.info(
+            "Retry pass %s/%s: %s uncaptured job(s). Waiting %ss then retrying with %s worker(s).",
+            pass_num + 1, MAX_RETRY_PASSES, len(pending), delay, workers,
+        )
+        await asyncio.sleep(delay)
 
-    retry_cfg = replace(
-        cfg,
-        workers=1,
-        retries=3,
-        delay_min=max(cfg.delay_min, 0.2),
-        delay_max=max(cfg.delay_max, 0.8),
-        error_jsonl=retry_error_jsonl,
-    )
-
-    logging.info("Normal run completed. Checking failed jobs for retry...")
-    logging.info("Retrying %s failed jobs with 1 worker and 3 retries...", len(failed_jobs))
-
-    if retry_cfg.progress_callback:
-        retry_cfg.progress_callback(
-            0,
-            len(failed_jobs),
-            f"Airnorth retry phase started for {len(failed_jobs)} failed jobs",
+        retry_cfg = replace(
+            cfg,
+            workers=workers,
+            retries=3,
+            delay_min=max(cfg.delay_min, 0.5),
+            delay_max=max(cfg.delay_max, 2.0),
+            fatal_stop=asyncio.Event(),
         )
 
-    queue: asyncio.Queue = asyncio.Queue()
-    for job in failed_jobs:
-        await queue.put(job)
+        queue: asyncio.Queue = asyncio.Queue()
+        for job in pending:
+            await queue.put(job)
 
-    write_lock = asyncio.Lock()
-    counters_lock = asyncio.Lock()
-    counters = {
-        "total": len(failed_jobs),
-        "processed": 0,
-        "success": 0,
-        "failed": 0,
-    }
+        write_lock    = asyncio.Lock()
+        counters_lock = asyncio.Lock()
+        counters = {
+            "total": len(pending),
+            "processed": 0,
+            "success": 0,
+            "failed": 0,
+            "brightdata_errors": 0,
+        }
 
-    retry_task = asyncio.create_task(
-        worker(
-            worker_id=1,
-            queue=queue,
-            client=client,
-            cfg=retry_cfg,
-            write_lock=write_lock,
-            counters=counters,
-            counters_lock=counters_lock,
-            session=session,
+        tasks = [
+            asyncio.create_task(
+                worker(
+                    worker_id=i + 1,
+                    queue=queue,
+                    client=client,
+                    cfg=retry_cfg,
+                    write_lock=write_lock,
+                    counters=counters,
+                    counters_lock=counters_lock,
+                    session=session,
+                )
+            )
+            for i in range(workers)
+        ]
+
+        await queue.join()
+        for _ in tasks:
+            await queue.put(None)
+        await asyncio.gather(*tasks)
+
+        completed_after = read_completed_keys(cfg.raw_jsonl)
+        recovered    = sum(1 for job in pending if job.key in completed_after)
+        still_pending = len(pending) - recovered
+        logging.info(
+            "Retry pass %s/%s done: recovered %s, still uncaptured %s.",
+            pass_num + 1, MAX_RETRY_PASSES, recovered, still_pending,
         )
-    )
 
-    await queue.join()
-    await queue.put(None)
-    await retry_task
+        if still_pending == 0:
+            logging.info("All jobs captured after %s retry pass(es).", pass_num + 1)
+            return
 
-    completed_after = read_completed_keys(cfg.raw_jsonl)
-    failed_keys = {job.key for job in failed_jobs}
-    recovered = len(failed_keys.intersection(completed_after))
-    still_failed = max(0, len(failed_jobs) - recovered)
-
-    logging.info(
-        "Retry phase recovered %s jobs, still failed %s jobs.",
-        recovered,
-        still_failed,
-    )
-
-    if retry_cfg.progress_callback:
-        retry_cfg.progress_callback(
-            len(failed_jobs),
-            len(failed_jobs),
-            f"Airnorth retry phase complete: recovered {recovered}, still failed {still_failed}",
+    # Final report after all passes are exhausted.
+    completed   = read_completed_keys(cfg.raw_jsonl)
+    uncaptured  = [job for job in all_jobs if job.key not in completed]
+    if uncaptured:
+        logging.error(
+            "Could not capture %s date(s) after %s retry pass(es): %s",
+            len(uncaptured),
+            MAX_RETRY_PASSES,
+            ", ".join(job.key for job in uncaptured),
         )
+    else:
+        logging.info("All %s jobs captured successfully after retry passes.", len(all_jobs))
 
 
 async def append_jsonl(path: Path, item: dict, lock: asyncio.Lock) -> None:
@@ -937,12 +949,46 @@ async def worker(
                 except BrightDataUnavailable as e:
                     fatal_stop = getattr(cfg, "fatal_stop", None)
                     already_stopping = bool(fatal_stop and fatal_stop.is_set())
-                    if fatal_stop:
-                        fatal_stop.set()
 
-                    if not already_stopping:
-                        logging.warning(BRIGHTDATA_WARNING)
-                        logging.warning("[W%s] Brightdata error for %s: %s", worker_id, job.key, e)
+                    async with counters_lock:
+                        counters["brightdata_errors"] += 1
+                        error_count = counters["brightdata_errors"]
+                        counters["processed"] += 1
+                        counters["failed"] += 1
+                        processed = counters["processed"]
+                        success = counters["success"]
+                        failed = counters["failed"]
+                        total = counters["total"]
+
+                    logging.warning("[W%s] Brightdata error for %s: %s", worker_id, job.key, e)
+
+                    # Always record so the retry loop can pick this job up.
+                    record = {
+                        "job_key": job.key,
+                        "origin": job.origin,
+                        "destination": job.destination,
+                        "departure_date": job.departure_date.strftime("%Y-%m-%d"),
+                        "status": "FAILED",
+                        "provider": "Brightdata",
+                        "attempt": cfg.retries,
+                        "rows": [],
+                        "error": str(e),
+                        "checked_at": datetime.now().isoformat(timespec="seconds"),
+                    }
+                    await append_jsonl(cfg.error_jsonl, record, write_lock)
+                    logging.info(
+                        "[W%s] FAILED %s | Progress %s/%s | OK=%s Failed=%s",
+                        worker_id, job.key, processed, total, success, failed,
+                    )
+
+                    # Only pause the main run if multiple workers are failing (systemic outage).
+                    # The retry loop will recover any dates missed during the pause.
+                    if error_count >= BRIGHTDATA_FATAL_THRESHOLD and fatal_stop and not already_stopping:
+                        logging.warning(
+                            BRIGHTDATA_WARNING + " (%s/%s worker failures — pausing main run, retry loop will recover remaining jobs)",
+                            error_count, BRIGHTDATA_FATAL_THRESHOLD,
+                        )
+                        fatal_stop.set()
                         if cfg.progress_callback:
                             cfg.progress_callback(0, counters["total"], BRIGHTDATA_WARNING)
                     continue
@@ -1223,6 +1269,7 @@ async def run_config(cfg: Config) -> None:
         "processed": 0,
         "success": 0,
         "failed": 0,
+        "brightdata_errors": 0,
     }
 
     if cfg.fatal_stop is None:
@@ -1259,10 +1306,9 @@ async def run_config(cfg: Config) -> None:
 
         await asyncio.gather(*tasks)
 
-        if not stop_requested(cfg):
-            await retry_failed_jobs(cfg, client, session=session)
-        else:
-            logging.info("Brightdata stopped early — skipping retry, exporting partial results.")
+        # Always run the retry loop — it compares against the full job list so
+        # CANCELLED, FAILED, and never-recorded dates are all recovered.
+        await retry_failed_jobs(cfg, client, all_jobs=jobs, session=session)
     finally:
         if session:
             await session.close()
