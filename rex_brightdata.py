@@ -157,7 +157,7 @@ FINAL_RETRY_ROUNDS = int(os.getenv("REX_FINAL_RETRY_ROUNDS", "1"))
 RETRY_BACKOFF_SECONDS = float(os.getenv("REX_RETRY_BACKOFF_SECONDS", "8"))
 # Pause (seconds) between routes so Bright Data can rotate to a fresh IP.
 # A fresh IP avoids hitting Rex's reCAPTCHA quota that was exhausted by the previous route.
-INTER_ROUTE_DELAY_SECONDS = int(os.getenv("REX_INTER_ROUTE_DELAY_SECONDS", "30"))
+INTER_ROUTE_DELAY_SECONDS = int(os.getenv("REX_INTER_ROUTE_DELAY_SECONDS", "60"))
 MAX_RETRY_BACKOFF_SECONDS = float(os.getenv("REX_MAX_RETRY_BACKOFF_SECONDS", "90"))
 JOB_TIMEOUT_SECONDS = int(os.getenv("REX_JOB_TIMEOUT_SECONDS", "240"))
 NAVIGATION_MODE = os.getenv("REX_NAVIGATION_MODE", "ribbon").lower()
@@ -179,7 +179,6 @@ CSV_FIELDS = [
     "Date of Departure", "Time of Departure",
     "Origin", "Destination",
     "Fare Price", "Fare Class", "Source",
-    "Run ID", "Status", "Comment", "Retry Count", "Debug Artifacts",
 ]
 
 STATUS_SUCCESS = "SUCCESS"
@@ -1456,6 +1455,13 @@ class RexScraper:
             self.captcha_disabled_threshold * 3,
             int(os.getenv("REX_MAX_VERIFICATION_LOOPS", "12")),
         )
+        # Tracks consecutive loops where Bright Data says "solve_finished" but Rex
+        # server still shows the verification page after we clicked Continue
+        # (force-enable path).  Rex is rejecting the token server-side — quota exhausted.
+        # After MAX_FORCE_ENABLE_STUCK_LOOPS consecutive occurrences bail immediately
+        # so we don't drain the entire 240s job_timeout on a doomed captcha loop.
+        force_enable_still_blocked = 0
+        _MAX_FORCE_ENABLE_STUCK = int(os.getenv("REX_MAX_FORCE_ENABLE_STUCK", "3"))
 
         while loop.time() < deadline:
             try:
@@ -1517,6 +1523,31 @@ class RexScraper:
                     except Exception:
                         pass
                     await asyncio.sleep(2)
+                    # ── Force-enable stuck-loop guard ──────────────────────
+                    # If Rex is still showing the verification page after we
+                    # clicked Continue, the server rejected the token
+                    # (reCAPTCHA quota exhausted for this IP).  Track consecutive
+                    # occurrences and bail early so we don't drain the full
+                    # job_timeout (240s) in a guaranteed-to-fail loop.
+                    if await self.page_has_rex_verification_page(page):
+                        force_enable_still_blocked += 1
+                        print(
+                            f"   ⚠️  Continue clicked but verification page persisted "
+                            f"(stuck count {force_enable_still_blocked}/{_MAX_FORCE_ENABLE_STUCK})"
+                        )
+                        if force_enable_still_blocked >= _MAX_FORCE_ENABLE_STUCK:
+                            return SearchOutcome(
+                                False,
+                                STATUS_BLOCKED,
+                                (
+                                    f"Rex verification page persisted after {force_enable_still_blocked} "
+                                    "consecutive Continue clicks — reCAPTCHA quota exhausted for this IP "
+                                    "(server rejecting tokens despite solve_finished)"
+                                ),
+                                retryable=True,
+                            )
+                    else:
+                        force_enable_still_blocked = 0
                     continue
                 verification_disabled_loops += 1
                 print(
@@ -2729,11 +2760,12 @@ class RexScraper:
 
             await self._close_context_safely(context, "failed route setup context")
             if attempt < self.max_attempts:
-                # If captcha quota is exhausted, reconnect to Bright Data so the next
-                # attempt gets a fresh IP with a clean reCAPTCHA quota.
-                if last_outcome and last_outcome.status == STATUS_BLOCKED:
+                # If captcha quota is exhausted (BLOCKED) or the force-enable loop
+                # burned the full timeout (TIMEOUT), reconnect to Bright Data so the
+                # next attempt gets a fresh IP with a clean reCAPTCHA quota.
+                if last_outcome and last_outcome.status in (STATUS_BLOCKED, STATUS_TIMEOUT):
                     print(
-                        f"   🔄 Captcha quota exhausted on attempt {attempt} — "
+                        f"   🔄 {last_outcome.status} on attempt {attempt} — "
                         "reconnecting Bright Data for a fresh IP..."
                     )
                     new_browser = await self._reconnect_browser()
@@ -2911,7 +2943,7 @@ class RexScraper:
         return JobResult(status, [], comment, True, attempt - 1, artifacts)
 
     async def navigate_ribbon_to_date(self, page, target_dt: datetime,
-                                      max_moves: int = 30) -> str:
+                                      max_moves: int = 10) -> str:
         for attempt in range(max_moves):
             tab_result = await self.click_ribbon_tab(page, target_dt)
             if tab_result in ("clicked", "unavailable"):
@@ -3427,12 +3459,36 @@ class RexScraper:
                 succeeded += 1
             else:
                 print(f"   ❌ Cleanup retry still failed: {date_str} — {result.status}: {result.comment}")
-                still_failed += 1
-                # If blocked again, reconnect for the next date to try a different IP
+                # Reconnect for a fresh IP whenever the date is blocked.
+                # Then immediately retry the SAME date on the new IP — so the fresh
+                # IP actually helps the date that triggered the reconnect, not the
+                # next one in the list.
                 if result.status == STATUS_BLOCKED:
                     new_browser = await self._reconnect_browser()
                     if new_browser:
                         effective_browser = new_browser
+                        print(f"   🔄 Retrying {date_str} on fresh Bright Data IP...")
+                        try:
+                            fresh_result = await self.scrape_job_with_retries(
+                                effective_browser, origin_code, dest_code, target_dt
+                            )
+                        except Exception as exc:
+                            fresh_result = JobResult(
+                                STATUS_FAILED, [],
+                                f"Fresh IP retry exception: {exc}",
+                                retryable=True,
+                            )
+                        self._write_result(origin_code, dest_code, date_str, fresh_result)
+                        if fresh_result.completed:
+                            print(f"   ✅ Fresh IP retry succeeded: {date_str} ({fresh_result.status})")
+                            succeeded += 1
+                        else:
+                            print(f"   ❌ Fresh IP retry also failed: {date_str} — {fresh_result.status}")
+                            still_failed += 1
+                    else:
+                        still_failed += 1
+                else:
+                    still_failed += 1
 
         print(f"\n   📋 Cleanup pass done: {succeeded} recovered, {still_failed} still failed.")
 
