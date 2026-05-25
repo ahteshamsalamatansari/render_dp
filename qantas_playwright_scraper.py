@@ -21,7 +21,11 @@ ROUTES = [
     ("BME", "KNX"),
     ("BME", "DRW"),
     ("DRW", "KNX"),
-    ("KNX", "BME")
+    ("KNX", "BME"),
+    ("PER", "GET"),
+    ("GET", "PER"),
+    ("DRW", "BME"),
+    ("KNX", "DRW"),
 ]
 DAYS_OUT = 84
 OUTPUT_DIR = Path("output")
@@ -29,13 +33,17 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 
 CUSTOMER_ID = "hl_fbc4a16a"
 ROUTE_CREDENTIALS = {
-    ("BME", "KNX"): {"zone": "scraping_browser2", "password": "nymmsv0ffs60"},
-    ("BME", "DRW"): {"zone": "qantas_1",           "password": "x9ck9dpthpsg"},
-    ("DRW", "KNX"): {"zone": "qantas_2",           "password": "kgu154ajo3d9"},
-    ("KNX", "BME"): {"zone": "qantas_3",           "password": "n748kj03bomt"},
+    ("BME", "KNX"): {"zone": "scraping_browser2",  "password": "nymmsv0ffs60"},
+    ("BME", "DRW"): {"zone": "qantas_1",            "password": "x9ck9dpthpsg"},
+    ("DRW", "KNX"): {"zone": "qantas_2",            "password": "kgu154ajo3d9"},
+    ("KNX", "BME"): {"zone": "qantas_3",            "password": "n748kj03bomt"},
+    ("PER", "GET"): {"zone": "qantas_browser_4",    "password": "q7b458ikgj87"},
+    ("GET", "PER"): {"zone": "qantas_browser_5",    "password": "64u5qm13pevg"},
+    ("DRW", "BME"): {"zone": "qantas_browser_6",    "password": "aah84ml95h00"},
+    ("KNX", "DRW"): {"zone": "qantas_browser_7",    "password": "kyp0m7odmdw9"},
 }
 
-AIRPORT_NAMES = {"BME": "Broome", "KNX": "Kununurra", "DRW": "Darwin"}
+AIRPORT_NAMES = {"BME": "Broome", "KNX": "Kununurra", "DRW": "Darwin", "PER": "Perth", "GET": "Geraldton"}
 AIRLINE = "Qantas"
 SOURCE = "qantas.com"
 
@@ -806,7 +814,12 @@ async def click_next_arrow(page):
 
 async def scrape_flight_cards(page, origin, dest):
     """Scrape flight cards from results page based on standard or shadow DOM structure."""
-    is_special = (origin == "BME" and dest == "DRW") or (origin == "DRW" and dest == "KNX")
+    is_special = (
+        (origin == "BME" and dest == "DRW") or
+        (origin == "DRW" and dest == "KNX") or
+        (origin == "DRW" and dest == "BME") or
+        (origin == "KNX" and dest == "DRW")
+    )
     if is_special:
         return await scrape_flight_cards_shadow(page, origin, dest)
     else:
@@ -892,6 +905,9 @@ async def scrape_flight_cards_shadow(page, origin, dest):
                 if (originCode === 'bme' && destCode === 'drw') {
                     if (lowerTxt.includes('airnorth')) hasRoute = true;
                 }
+                if (originCode === 'drw' && destCode === 'bme') {
+                    if (lowerTxt.includes('airnorth')) hasRoute = true;
+                }
 
                 if (hasRoute) {
                     let times = txt.match(/(\\d{1,2}:\\d{2})/g);
@@ -927,7 +943,7 @@ async def scrape_flight_cards_shadow(page, origin, dest):
                     let isDirect = !lowerTxt.includes('1 stop') && !lowerTxt.includes('2 stop') && !lowerTxt.includes('via') && !lowerTxt.includes('connect');
                     if (row.classList && row.classList.contains('e2e-direct-flight')) isDirect = true;
 
-                    let specialRoutes = [['bme','drw'], ['drw','knx']];
+                    let specialRoutes = [['bme','drw'], ['drw','knx'], ['drw','bme'], ['knx','drw']];
                     let isSpecialRoute = specialRoutes.some(r => r[0] === originCode && r[1] === destCode);
 
                     if (isSpecialRoute) {
@@ -1022,7 +1038,12 @@ async def scrape_route(origin, dest, today):
 
             collected_dates = set()
             limit_date = today + timedelta(days=DAYS_OUT)
-            is_special = (origin == "BME" and dest == "DRW") or (origin == "DRW" and dest == "KNX")
+            is_special = (
+                (origin == "BME" and dest == "DRW") or
+                (origin == "DRW" and dest == "KNX") or
+                (origin == "DRW" and dest == "BME") or
+                (origin == "KNX" and dest == "DRW")
+            )
             expected_date = today
             no_new_streak = 0
             
@@ -1162,8 +1183,11 @@ def parse_args():
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(description="Qantas Playwright Fare Tracker")
     parser.add_argument(
-        "--route", type=int, default=None, choices=[1, 2, 3, 4, 5],
-        help="Run specific route: 1=BME->KNX, 2=BME->DRW, 3=DRW->KNX, 4=KNX->BME, 5=All routes sequentially"
+        "--route", type=int, default=None, choices=[1, 2, 3, 4, 5, 6, 7, 8, 9],
+        help=(
+            "Run specific route: 1=BME->KNX, 2=BME->DRW, 3=DRW->KNX, 4=KNX->BME, "
+            "5=PER->GET, 6=GET->PER, 7=DRW->BME, 8=KNX->DRW, 9=All routes sequentially"
+        )
     )
     return parser.parse_args()
 
@@ -1175,14 +1199,14 @@ def interactive_menu():
     for i, (o, d) in enumerate(ROUTES, 1):
         zone = ROUTE_CREDENTIALS[(o, d)]["zone"]
         print(f"    {i}. {o} -> {d}  (zone: {zone})")
-    print(f"    5. All 4 routes sequentially\n")
+    print(f"    9. All 8 routes sequentially\n")
 
     while True:
         try:
-            choice = int(input(f"  Enter choice (1-5): ").strip())
-            if 1 <= choice <= 4:
+            choice = int(input(f"  Enter choice (1-9): ").strip())
+            if 1 <= choice <= 8:
                 return [ROUTES[choice - 1]]
-            elif choice == 5:
+            elif choice == 9:
                 return list(ROUTES)
         except Exception:
             pass
@@ -1193,7 +1217,7 @@ async def main():
 
     # Determine which routes to run
     if args.route is not None:
-        if args.route == 5:
+        if args.route == 9:
             routes = list(ROUTES)
         else:
             routes = [ROUTES[args.route - 1]]
@@ -1201,8 +1225,8 @@ async def main():
         # No args and interactive session - show menu
         routes = interactive_menu()
     else:
-        # Non-interactive session or fallback - run all 4 routes sequentially
-        print("Non-interactive session detected (Cron/CI). Defaulting to running all 4 routes sequentially.")
+        # Non-interactive session or fallback - run all 8 routes sequentially
+        print("Non-interactive session detected (Cron/CI). Defaulting to running all 8 routes sequentially.")
         routes = list(ROUTES)
 
     print(f"\n{'='*60}")
