@@ -57,6 +57,8 @@ ROUTES = [
     ("BME", "KNX"),
     ("BME", "DRW"),
     ("DRW", "KNX"),
+    ("DRW", "BME"),
+    ("KNX", "DRW"),
     ("KNX", "BME"),
 ]
 
@@ -86,9 +88,6 @@ FINAL_COLUMNS = [
     "Fare Price",
     "Fare Class",
     "Source",
-    "Status",
-    "Provider",
-    "Attempt",
 ]
 
 BLOCKED_TEXT_MARKERS = [
@@ -722,7 +721,6 @@ def write_final_files(cfg: Config) -> None:
             "Destination",
             "Time of Departure",
             "Fare Class",
-            "Provider",
         ],
         keep="last",
         inplace=True,
@@ -755,7 +753,7 @@ def write_final_files(cfg: Config) -> None:
             pivot.to_excel(writer, sheet_name="Cheapest By Route")
 
         summary = (
-            df.groupby(["Origin", "Destination", "Status"])
+            df.groupby(["Origin", "Destination"])
             .size()
             .reset_index(name="Count")
         )
@@ -791,9 +789,6 @@ def build_url(job: Job) -> str:
 def build_rows(
     job: Job,
     flights: list[dict],
-    status: str,
-    provider: str,
-    attempt: int,
     date_checked: str,
     time_checked: str,
 ) -> list[dict]:
@@ -812,9 +807,6 @@ def build_rows(
                 "Fare Price": flight.get("price"),
                 "Fare Class": flight.get("fare_class", "UNKNOWN"),
                 "Source": SOURCE,
-                "Status": status,
-                "Provider": provider,
-                "Attempt": attempt,
             }
         )
 
@@ -871,9 +863,6 @@ async def scrape_job_with_brightdata(
                 rows = build_rows(
                     job=job,
                     flights=flights,
-                    status="OK",
-                    provider=provider_name,
-                    attempt=attempt,
                     date_checked=date_checked,
                     time_checked=time_checked,
                 )
