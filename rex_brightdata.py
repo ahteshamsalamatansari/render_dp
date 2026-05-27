@@ -22,7 +22,6 @@ import time
 import argparse
 import json
 import random
-import requests
 import tempfile
 import traceback
 from dataclasses import dataclass, field as dc_field
@@ -41,33 +40,18 @@ ORIGINAL_STDOUT = sys.stdout
 ORIGINAL_STDERR = sys.stderr
 
 # ─────────────────────────────────────────────────────────────
-#  BRIGHT DATA CREDENTIALS
+#  BRIGHT DATA CREDENTIALS  (Playwright CDP — port 9222 only)
 # ─────────────────────────────────────────────────────────────
 BD_BROWSER_HOST = os.getenv("BD_BROWSER_HOST", "brd.superproxy.io")
 BD_BROWSER_PORT = os.getenv("BD_BROWSER_PORT", "9222")
-BD_BROWSER_SELENIUM_PORT = os.getenv("BD_BROWSER_SELENIUM_PORT", "9515")
 BD_BROWSER_USER = os.getenv(
     "BD_BROWSER_USER",
     "brd-customer-hl_fbc4a16a-zone-cont_rex",
 )
 BD_BROWSER_PASS = os.getenv("BD_BROWSER_PASS", "072res2p22t3")
-BD_AUTH_TOKEN = os.getenv(
-    "BD_AUTH_TOKEN",
-    "7b1cdf1c-e4e0-4b6c-925b-0121031e6bf7",
-)
-BD_WEB_UNLOCKER_ZONE = os.getenv("BD_WEB_UNLOCKER_ZONE", "cron_rex")
-BD_UNLOCKER_COUNTRY = os.getenv("BD_UNLOCKER_COUNTRY", "au")
-BD_UNLOCKER_ENDPOINT = os.getenv(
-    "BD_UNLOCKER_ENDPOINT",
-    "https://api.brightdata.com/request",
-)
 BD_BROWSER_WSS = os.getenv(
     "BD_BROWSER_WSS",
     f"wss://{BD_BROWSER_USER}:{BD_BROWSER_PASS}@{BD_BROWSER_HOST}:{BD_BROWSER_PORT}",
-)
-BD_BROWSER_SELENIUM_URL = os.getenv(
-    "BD_BROWSER_SELENIUM_URL",
-    f"https://{BD_BROWSER_USER}:{BD_BROWSER_PASS}@{BD_BROWSER_HOST}:{BD_BROWSER_SELENIUM_PORT}",
 )
 
 SENSITIVE_BRIGHTDATA_URL_RE = re.compile(
@@ -92,34 +76,6 @@ except ZoneInfoNotFoundError:
     REX_TIMEZONE = "Australia/Perth"
     REX_TZ = ZoneInfo(REX_TIMEZONE)
 
-
-def web_unlocker_get(url: str) -> str:
-    """Bright Data Web Unlocker API se HTML fetch karo."""
-    payload = {"zone": BD_WEB_UNLOCKER_ZONE, "url": url, "format": "raw"}
-    if BD_UNLOCKER_COUNTRY:
-        payload["country"] = BD_UNLOCKER_COUNTRY
-
-    resp = requests.post(
-        BD_UNLOCKER_ENDPOINT,
-        json=payload,
-        headers={"Authorization": f"Bearer {BD_AUTH_TOKEN}",
-                 "Content-Type": "application/json"},
-        timeout=60,
-    )
-    resp.raise_for_status()
-    return resp.text
-
-
-def check_web_unlocker() -> bool:
-    """Run Bright Data's lightweight Web Unlocker test request."""
-    test_url = "https://geo.brdtest.com/welcome.txt?product=unlocker&method=api"
-    try:
-        text = web_unlocker_get(test_url).strip()
-        print(f"✅ Web Unblocker check OK: {text[:180]}")
-        return True
-    except Exception as exc:
-        print(f"⚠️  Web Unblocker check failed: {exc}")
-        return False
 
 # ─────────────────────────────────────────────────────────────
 #  CONFIGURATION
@@ -152,9 +108,9 @@ DEBUG_DIR = os.getenv("REX_DEBUG_DIR", "rex_debug")
 LOG_DIR = os.getenv("REX_LOG_DIR", "rex_logs")
 RUN_ID = os.getenv("REX_RUN_ID", datetime.now(REX_TZ).strftime("%Y%m%d"))
 
-MAX_ATTEMPTS = int(os.getenv("REX_MAX_ATTEMPTS", "3"))
+MAX_ATTEMPTS = int(os.getenv("REX_MAX_ATTEMPTS", "6"))
 FINAL_RETRY_ROUNDS = int(os.getenv("REX_FINAL_RETRY_ROUNDS", "1"))
-RETRY_BACKOFF_SECONDS = float(os.getenv("REX_RETRY_BACKOFF_SECONDS", "8"))
+RETRY_BACKOFF_SECONDS = float(os.getenv("REX_RETRY_BACKOFF_SECONDS", "15"))
 # Pause (seconds) between routes so Bright Data can rotate to a fresh IP.
 # A fresh IP avoids hitting Rex's reCAPTCHA quota that was exhausted by the previous route.
 INTER_ROUTE_DELAY_SECONDS = int(os.getenv("REX_INTER_ROUTE_DELAY_SECONDS", "60"))
@@ -180,6 +136,12 @@ CSV_FIELDS = [
     "Origin", "Destination",
     "Fare Price", "Fare Class", "Source",
 ]
+
+# Internal tracking columns written to Excel but NOT shown in the user-visible
+# column list above.  "Status" is required for resume / cleanup-pass logic
+# (job_completed + failed_route_dates both read it from Excel rows).
+# "Run ID" is intentionally excluded — row matching now uses Origin+Dest+Date only.
+INTERNAL_EXCEL_FIELDS = ["Status"]
 
 STATUS_SUCCESS = "SUCCESS"
 STATUS_NO_FARE = "NO_FARE_AVAILABLE"
@@ -437,12 +399,16 @@ class OutputStore:
     def _ensure_headers(self, ws):
         headers = self._headers(ws)
         if not any(headers):
+            # Brand-new or fully-empty header row — write all columns from scratch.
             for idx, col_name in enumerate(CSV_FIELDS, 1):
                 ws.cell(row=1, column=idx).value = col_name
+            # Internal tracking columns go directly after the user-visible ones.
+            for offset, col_name in enumerate(INTERNAL_EXCEL_FIELDS, 1):
+                ws.cell(row=1, column=len(CSV_FIELDS) + offset).value = col_name
             return
 
         changed = False
-        for col_name in CSV_FIELDS:
+        for col_name in CSV_FIELDS + INTERNAL_EXCEL_FIELDS:
             if col_name not in headers:
                 headers.append(col_name)
                 ws.cell(row=1, column=len(headers)).value = col_name
@@ -470,11 +436,13 @@ class OutputStore:
                     pass
 
     def _row_matches_job(self, ws, row_idx: int, run_id: str, origin: str, dest: str, date_str: str) -> bool:
+        # NOTE: run_id parameter kept for signature compatibility but is no longer
+        # used for matching — "Run ID" was removed from the user-visible output.
+        # Rows are uniquely identified by Origin + Destination + Date of Departure.
         headers = self._headers(ws)
         values = {header: ws.cell(row=row_idx, column=idx + 1).value for idx, header in enumerate(headers)}
         return (
-            str(values.get("Run ID") or "") == run_id
-            and str(values.get("Origin") or "") == origin
+            str(values.get("Origin") or "") == origin
             and str(values.get("Destination") or "") == dest
             and str(values.get("Date of Departure") or "") == date_str
         )
@@ -540,6 +508,38 @@ class OutputStore:
             if statuses & RETRYABLE_FAILURE_STATUSES:
                 failed.append(date_str)
         return failed
+
+    def purge_failure_rows(self, origin: str, dest: str) -> int:
+        """Delete every row for this origin→dest that still carries a retryable
+        failure status (TIMEOUT, BLOCKED, FAILED, etc.).
+
+        Called at the very end of a route's run so the Excel delivered to the
+        client only ever contains clean SUCCESS / NO_FARE rows.  Any date that
+        could not be recovered is simply absent from the file — the next
+        scheduled cron run will retry those dates automatically (job_completed
+        returns False for rows that don't exist, so the main loop picks them up
+        fresh without needing --resume or any manual intervention).
+        """
+        if not os.path.exists(self.path):
+            return 0
+        wb, ws = self._load()
+        headers = self._headers(ws)
+        deleted = 0
+        for row_idx in range(ws.max_row, 1, -1):
+            vals = {
+                h: ws.cell(row=row_idx, column=i + 1).value
+                for i, h in enumerate(headers)
+            }
+            if (str(vals.get("Origin") or "") != origin
+                    or str(vals.get("Destination") or "") != dest):
+                continue
+            status = str(vals.get("Status") or "")
+            if status in RETRYABLE_FAILURE_STATUSES:
+                ws.delete_rows(row_idx, 1)
+                deleted += 1
+        if deleted > 0:
+            self._save_atomic(wb)
+        return deleted
 
 
 OUTPUT_STORE: OutputStore | None = None
@@ -1493,7 +1493,10 @@ class RexScraper:
                     "waiting for Bright Data captcha solver..."
                 )
                 remaining_seconds = max(1.0, deadline - loop.time())
-                solver_timeout = int(min(30000, max(8000, remaining_seconds * 1000)))
+                # reCAPTCHA (Premium domains) can take 20-45s to solve — raise cap
+                # from 30s to 45s so Bright Data has enough time to generate a valid
+                # Google token before we fall back to the force-enable path.
+                solver_timeout = int(min(45000, max(8000, remaining_seconds * 1000)))
                 click_timeout = int(min(10000, max(3000, remaining_seconds * 1000)))
                 captcha_status = await self.wait_for_brightdata_captcha(page, detect_timeout=solver_timeout)
                 if captcha_status == "failed":
@@ -3568,6 +3571,24 @@ class RexScraper:
                     print("\n⛔ Cleanup pass interrupted.")
                 except Exception as exc:
                     print(f"\n⚠️  Cleanup pass encountered an error (non-fatal): {exc}")
+
+                # ── Final Excel clean-up ───────────────────────────────────
+                # Remove any rows that are still failure statuses after all
+                # retry rounds and the cleanup pass.  The Excel is delivered
+                # directly to the client, so it must only contain clean
+                # SUCCESS / NO_FARE rows.  Dates that couldn't be recovered
+                # will simply be absent — the next cron run retries them
+                # automatically (job_completed returns False for missing rows,
+                # so the main loop picks them up fresh, no manual --resume
+                # needed).
+                if OUTPUT_STORE:
+                    purged = OUTPUT_STORE.purge_failure_rows(origin_code, dest_code)
+                    if purged:
+                        print(
+                            f"\n   🧹 Purged {purged} unrecovered failure row(s) for "
+                            f"{origin_code}→{dest_code} — next scheduled run will "
+                            f"retry these dates automatically."
+                        )
             finally:
                 if browser:
                     await browser.close()
@@ -3668,7 +3689,6 @@ def parse_args():
         help="Seconds to pause between routes so Bright Data can rotate to a fresh IP (default: 30)",
     )
     parser.add_argument("--list", action="store_true", help="Show supported routes")
-    parser.add_argument("--skip-unblocker-check", action="store_true")
     return parser.parse_args()
 
 
@@ -3771,9 +3791,6 @@ if __name__ == "__main__":
 
     log_fh = configure_run_logging(LOG_DIR, RUN_ID)
     OUTPUT_STORE = OutputStore(OUTPUT_EXCEL, RUN_ID)
-
-    if not ns.skip_unblocker_check:
-        check_web_unlocker()
 
     scraper = RexScraper(
         headless=False,
