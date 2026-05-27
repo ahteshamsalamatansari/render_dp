@@ -198,7 +198,11 @@ async def interruptible_async_sleep(seconds, stop_requested_fn=None):
     return False
 
 
-def retry_delay_seconds(attempt: int) -> float:
+def retry_delay_seconds(attempt: int, is_timeout: bool = False) -> float:
+    if is_timeout:
+        # Timeouts need a much longer back-off to let the server recover.
+        # 10 s, 20 s, 30 s — so repeated timeouts don't hammer the proxy.
+        return min(30.0, 10.0 * attempt)
     return min(BRIGHTDATA_RETRY_DELAY_MAX_S, BRIGHTDATA_RETRY_DELAY_BASE_S * attempt)
 
 
@@ -332,9 +336,6 @@ def brightdata_request_sync(client: BrightDataClient, url: str) -> str:
     if status < 200 or status >= 300:
         raise BrightDataUnavailable(f"HTTP {status}: {text[:500]}")
 
-    if not text.strip():
-        raise BrightDataUnavailable("Empty Brightdata response")
-
     return text
 
 
@@ -367,9 +368,6 @@ async def brightdata_request_async(session, client: BrightDataClient, url: str) 
 
     if status < 200 or status >= 300:
         raise BrightDataUnavailable(f"HTTP {status}: {text[:500]}")
-
-    if not text.strip():
-        raise BrightDataUnavailable("Empty Brightdata response")
 
     return text
 
@@ -598,7 +596,7 @@ async def retry_failed_jobs(
             retries=3,
             delay_min=max(cfg.delay_min, 0.5),
             delay_max=max(cfg.delay_max, 2.0),
-            fatal_stop=asyncio.Event(),
+            fatal_stop=None,  # No fatal stop in retry passes — every job runs to completion
         )
 
         queue: asyncio.Queue = asyncio.Queue()
@@ -851,6 +849,14 @@ async def scrape_job_with_brightdata(
             html = await fetch_brightdata_url(client, url, session=session)
             title = ""
 
+            if not html.strip():
+                # Server returned HTTP 200 but an empty body — not a Brightdata
+                # outage, just a bad response for this specific request. Retry it.
+                last_error = "Empty page returned — will retry"
+                if await interruptible_async_sleep(retry_delay_seconds(attempt), lambda: stop_requested(cfg)):
+                    break
+                continue
+
             if looks_blocked(title, html):
                 last_error = "Blocked/challenge page returned by Brightdata"
                 if await interruptible_async_sleep(retry_delay_seconds(attempt), lambda: stop_requested(cfg)):
@@ -878,12 +884,23 @@ async def scrape_job_with_brightdata(
 
             last_error = "Parser returned empty despite Brightdata response"
 
+            # Log a preview of the raw HTML so we can diagnose why the parser
+            # found nothing — Cloudflare pages, error pages, or layout changes
+            # all look like "empty" to the parser.
+            logging.warning(
+                "Parse empty for %s (attempt %s) — HTML preview: %s",
+                job.key,
+                attempt,
+                html[:800].replace("\n", " ").strip(),
+            )
+
             if await interruptible_async_sleep(retry_delay_seconds(attempt), lambda: stop_requested(cfg)):
                 break
 
         except BrightDataUnavailable as e:
             last_error = str(e)
-            if await interruptible_async_sleep(retry_delay_seconds(attempt), lambda: stop_requested(cfg)):
+            _is_timeout = "timed out" in last_error.lower()
+            if await interruptible_async_sleep(retry_delay_seconds(attempt, is_timeout=_is_timeout), lambda: stop_requested(cfg)):
                 break
         except Exception as e:
             last_error = repr(e)
@@ -1152,13 +1169,13 @@ def build_config() -> Config:
         help="Route like BME-KNX. Can be used multiple times.",
     )
     parser.add_argument("--days", type=int, default=DEFAULT_DAYS_OUT)
-    parser.add_argument("--workers", type=int, default=16)
+    parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--retries", type=int, default=3)
     parser.add_argument("--goto-timeout-ms", type=int, default=40000)
     parser.add_argument("--selector-timeout-ms", type=int, default=15000)
     parser.add_argument("--cloudflare-timeout-s", type=int, default=25)
-    parser.add_argument("--delay-min", type=float, default=0.0)
-    parser.add_argument("--delay-max", type=float, default=0.3)
+    parser.add_argument("--delay-min", type=float, default=1.5)
+    parser.add_argument("--delay-max", type=float, default=2.0)
     parser.add_argument("--no-block-assets", action="store_true")
     parser.add_argument(
         "--resume-dir",
@@ -1346,7 +1363,7 @@ async def run_config(cfg: Config) -> None:
 async def scrape_airnorth_fast(
     selected_routes=None,
     days_out=DEFAULT_DAYS_OUT,
-    workers=16,
+    workers=8,
     progress_callback=None,
     stop_requested=None,
 ) -> dict:
@@ -1362,8 +1379,8 @@ async def scrape_airnorth_fast(
         goto_timeout_ms=40000,
         selector_timeout_ms=15000,
         cloudflare_timeout_s=25,
-        delay_min=0.0,
-        delay_max=0.3,
+        delay_min=1.5,
+        delay_max=2.0,
         block_assets=True,
         selected_routes=selected_routes or list(ROUTES),
         run_dir=run_dir,
