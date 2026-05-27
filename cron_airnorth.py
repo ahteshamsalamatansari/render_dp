@@ -55,6 +55,16 @@ ROUTES = [
         "label": "DRW → KNX (Darwin → Kununurra)",
     },
     {
+        "name": "Airnorth DRW → BME",
+        "route_arg": "DRW-BME",
+        "label": "DRW → BME (Darwin → Broome)",
+    },
+    {
+        "name": "Airnorth KNX → DRW",
+        "route_arg": "KNX-DRW",
+        "label": "KNX → DRW (Kununurra → Darwin)",
+    },
+    {
         "name": "Airnorth KNX → BME",
         "route_arg": "KNX-BME",
         "label": "KNX → BME (Kununurra → Broome)",
