@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import random
 import re
 import sys
@@ -991,8 +992,9 @@ async def scrape_route(origin, dest, today):
     # ── Bright Data Scraping Browser Setup ──
     route_key = (origin, dest)
     creds = ROUTE_CREDENTIALS.get(route_key, {"zone": "scraping_browser2", "password": "nymmsv0ffs60"})
-    zone = creds["zone"]
-    password = creds["password"]
+    env_prefix = f"QANTAS_{origin}_{dest}"
+    zone     = os.getenv(f"{env_prefix}_ZONE") or creds["zone"]
+    password = os.getenv(f"{env_prefix}_PASS") or creds["password"]
     
     sid = random.randint(1000000, 9999999)
     username = f"brd-customer-{CUSTOMER_ID}-zone-{zone}-country-au-session-{sid}"

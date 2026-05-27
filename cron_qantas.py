@@ -41,6 +41,10 @@ ROUTES = [
     (2, "BME", "DRW"),
     (3, "DRW", "KNX"),
     (4, "KNX", "BME"),
+    (5, "PER", "GET"),
+    (6, "GET", "PER"),
+    (7, "DRW", "BME"),
+    (8, "KNX", "DRW"),
 ]
 
 # Maps route_num → (alt_zone_var, alt_pass_var, prim_zone_var, prim_pass_var)
@@ -50,6 +54,10 @@ ALT_CRED_MAP = {
     2: ("QANTAS_ALT_BME_DRW_ZONE", "QANTAS_ALT_BME_DRW_PASS", "QANTAS_BME_DRW_ZONE", "QANTAS_BME_DRW_PASS"),
     3: ("QANTAS_ALT_DRW_KNX_ZONE", "QANTAS_ALT_DRW_KNX_PASS", "QANTAS_DRW_KNX_ZONE", "QANTAS_DRW_KNX_PASS"),
     4: ("QANTAS_ALT_KNX_BME_ZONE", "QANTAS_ALT_KNX_BME_PASS", "QANTAS_KNX_BME_ZONE", "QANTAS_KNX_BME_PASS"),
+    5: ("QANTAS_ALT_PER_GET_ZONE",  "QANTAS_ALT_PER_GET_PASS",  "QANTAS_PER_GET_ZONE",  "QANTAS_PER_GET_PASS"),
+    6: ("QANTAS_ALT_GET_PER_ZONE",  "QANTAS_ALT_GET_PER_PASS",  "QANTAS_GET_PER_ZONE",  "QANTAS_GET_PER_PASS"),
+    7: ("QANTAS_ALT_DRW_BME_ZONE",  "QANTAS_ALT_DRW_BME_PASS",  "QANTAS_DRW_BME_ZONE",  "QANTAS_DRW_BME_PASS"),
+    8: ("QANTAS_ALT_KNX_DRW_ZONE",  "QANTAS_ALT_KNX_DRW_PASS",  "QANTAS_KNX_DRW_ZONE",  "QANTAS_KNX_DRW_PASS"),
 }
 
 # ── Helpers ─────────────────────────────────────────────
