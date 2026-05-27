@@ -38,7 +38,6 @@ SCRAPER = {
     "name": "Rex Airlines",
     "command": [
         "python", "rex_brightdata.py",
-        "--skip-unblocker-check",
         "--output", "output/rex_results_all_routes.xlsx",
     ],
     "routes": [
