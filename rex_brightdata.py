@@ -24,6 +24,7 @@ import json
 import random
 import tempfile
 import traceback
+import urllib.request
 from dataclasses import dataclass, field as dc_field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -63,6 +64,89 @@ def redact_sensitive_text(text: str) -> str:
     return SENSITIVE_BRIGHTDATA_URL_RE.sub(
         "brightdata://<redacted>@brd.superproxy.io", str(text)
     )
+
+
+# ─────────────────────────────────────────────────────────────
+#  CAPSOLVER — reCAPTCHA / CAPTCHA fallback solver
+#  Used when Bright Data's built-in solver returns "failed" or
+#  "not_detected" for Google reCAPTCHA v2 on the Rex verification page.
+# ─────────────────────────────────────────────────────────────
+CAPSOLVER_API_KEY = os.getenv(
+    "CAPSOLVER_API_KEY",
+    "CAP-D9EC80AA2D25FEB038515477B6B0F668AFE90492C3A19ECA7EFF0D31969EE410",
+)
+
+
+def _capsolver_post_sync(url: str, payload: dict) -> dict:
+    """Synchronous HTTP POST to CapSolver REST API (called via asyncio.to_thread)."""
+    data = json.dumps(payload).encode()
+    req = urllib.request.Request(
+        url, data=data, headers={"Content-Type": "application/json"}
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return json.loads(resp.read().decode())
+
+
+async def capsolver_solve_recaptcha_v2(
+    site_key: str, page_url: str, timeout: int = 90
+) -> "str | None":
+    """
+    Solve a Google reCAPTCHA v2 challenge via CapSolver API.
+
+    Posts a ReCaptchaV2TaskProxyless task, polls until ready, and returns
+    the gRecaptchaResponse token that can be injected into the page.
+    Returns None if the key is missing, quota exceeded, or timeout is reached.
+    """
+    if not CAPSOLVER_API_KEY:
+        return None
+    try:
+        create_resp = await asyncio.to_thread(
+            _capsolver_post_sync,
+            "https://api.capsolver.com/createTask",
+            {
+                "clientKey": CAPSOLVER_API_KEY,
+                "task": {
+                    "type": "ReCaptchaV2TaskProxyless",
+                    "websiteURL": page_url,
+                    "websiteKey": site_key,
+                },
+            },
+        )
+        if create_resp.get("errorId", 0) != 0:
+            print(f"   ❌ CapSolver create-task error: {create_resp.get('errorDescription')}")
+            return None
+        task_id = create_resp.get("taskId")
+        if not task_id:
+            print("   ❌ CapSolver: no taskId in response")
+            return None
+        print(f"   🔑 CapSolver reCAPTCHA task queued (id={task_id[:8]}...)")
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while loop.time() < deadline:
+            await asyncio.sleep(4)
+            result_resp = await asyncio.to_thread(
+                _capsolver_post_sync,
+                "https://api.capsolver.com/getTaskResult",
+                {"clientKey": CAPSOLVER_API_KEY, "taskId": task_id},
+            )
+            if result_resp.get("errorId", 0) != 0:
+                print(f"   ❌ CapSolver poll error: {result_resp.get('errorDescription')}")
+                return None
+            if result_resp.get("status") == "ready":
+                token = result_resp.get("solution", {}).get("gRecaptchaResponse")
+                if token:
+                    print("   ✅ CapSolver: reCAPTCHA v2 solved!")
+                    return token
+                print("   ⚠️  CapSolver: status=ready but no token in solution")
+                return None
+            # status == "processing" — keep polling
+        print("   ⏱️  CapSolver: timed out waiting for reCAPTCHA solution")
+        return None
+    except Exception as exc:
+        print(f"   ❌ CapSolver exception: {exc}")
+        return None
+
 
 # Empty-result warning counter. Default is intentionally high so 84-day runs
 # keep recording every date even when many dates have no flights.
@@ -832,6 +916,107 @@ class RexScraper:
         except Exception:
             return False
 
+    # ── CapSolver integration ────────────────────────────────
+
+    async def _get_recaptcha_sitekey(self, page) -> "str | None":
+        """Extract the reCAPTCHA v2 data-sitekey from the Rex verification page."""
+        try:
+            sitekey = await page.evaluate("""() => {
+                // Standard g-recaptcha div
+                const el = document.querySelector('[data-sitekey]');
+                if (el) return el.getAttribute('data-sitekey');
+                // Fallback: scan script tags for embedded sitekey
+                for (const s of document.querySelectorAll('script')) {
+                    const m = s.textContent.match(/['"](6L[A-Za-z0-9_-]{38})['"]/);
+                    if (m) return m[1];
+                }
+                return null;
+            }""")
+            return sitekey or None
+        except Exception:
+            return None
+
+    async def _inject_recaptcha_token_rex(self, page, token: str) -> bool:
+        """
+        Inject a CapSolver reCAPTCHA token into the Rex verification page.
+
+        Replicates what Google's reCAPTCHA callback would do:
+          1. Writes the token to the g-recaptcha-response textarea
+          2. Calls Rex's own data-callback function (enables button + sets #txtcaptcha)
+          3. Falls back to force-enable if the callback is not found
+        """
+        try:
+            result = await page.evaluate("""(token) => {
+                try {
+                    // 1. g-recaptcha-response textarea (standard reCAPTCHA field)
+                    const textarea = document.getElementById('g-recaptcha-response');
+                    if (textarea) {
+                        textarea.style.display = '';
+                        textarea.value = token;
+                    }
+                    // 2. Rex internal captcha field
+                    const txt = document.getElementById('txtcaptcha');
+                    if (txt) txt.value = token;
+                    // 3. Call Rex's registered reCAPTCHA callback (data-callback attr)
+                    //    This is what Google would invoke after a real solve —
+                    //    it enables button.availCont and sets #txtcaptcha.
+                    const widget = document.querySelector('[data-callback]');
+                    if (widget) {
+                        const cbName = widget.getAttribute('data-callback');
+                        if (cbName && typeof window[cbName] === 'function') {
+                            window[cbName](token);
+                            return 'callback_called';
+                        }
+                    }
+                    // 4. Fallback: force-enable button directly
+                    const btn = document.querySelector('button.availCont');
+                    if (btn) {
+                        btn.removeAttribute('disabled');
+                        btn.disabled = false;
+                    }
+                    return 'force_enabled';
+                } catch(e) {
+                    return 'error:' + e.message;
+                }
+            }""", token)
+            print(f"   🔑 CapSolver token injected into Rex verification page (result={result!r})")
+            return True
+        except Exception as exc:
+            print(f"   ⚠️  CapSolver token injection failed: {exc}")
+            return False
+
+    async def _try_capsolver_rex(self, page, remaining_seconds: float) -> bool:
+        """
+        Attempt to solve Rex's reCAPTCHA via CapSolver and inject the token.
+
+        Called when Bright Data's built-in solver returns "failed" or "not_solved".
+        Returns True if a valid token was obtained and successfully injected into
+        the page (the Continue button should now be enabled or force-enabled).
+        Returns False if CapSolver is unavailable, the site key is missing,
+        or the token could not be obtained within the remaining time budget.
+        """
+        if not CAPSOLVER_API_KEY:
+            return False
+
+        site_key = await self._get_recaptcha_sitekey(page)
+        if not site_key:
+            print("   ⚠️  CapSolver: reCAPTCHA site key not found on Rex verification page")
+            return False
+
+        page_url = page.url
+        # Leave at least 10 s after CapSolver returns for token injection + click
+        capsolver_budget = max(20, min(90, int(remaining_seconds) - 10))
+        print(
+            f"   🔄 CapSolver: solving Rex reCAPTCHA "
+            f"(sitekey={site_key[:12]}..., budget={capsolver_budget}s)"
+        )
+
+        token = await capsolver_solve_recaptcha_v2(site_key, page_url, timeout=capsolver_budget)
+        if not token:
+            return False
+
+        return await self._inject_recaptcha_token_rex(page, token)
+
     async def click_rex_verification_continue(self, page, timeout: int = 15000) -> bool:
         try:
             btn = page.locator("button.availCont").first
@@ -1500,25 +1685,31 @@ class RexScraper:
                 click_timeout = int(min(10000, max(3000, remaining_seconds * 1000)))
                 captcha_status = await self.wait_for_brightdata_captcha(page, detect_timeout=solver_timeout)
                 if captcha_status == "failed":
-                    # Bright Data returned invalid/solve_failed — Rex's reCAPTCHA quota is
-                    # exhausted for this IP.  Continuing to loop will just waste the remaining
-                    # time budget (each loop ≈ 10–30 s) before hitting the hard 240 s timeout.
-                    # Bail now so the outer retry can attempt a different approach / IP.
-                    return SearchOutcome(
-                        False,
-                        STATUS_BLOCKED,
-                        (
-                            f"Rex reCAPTCHA hard-failed (invalid/solve_failed) on loop "
-                            f"{total_verification_loops}/{max_total_verification} — "
-                            "reCAPTCHA quota exhausted for this Bright Data IP"
-                        ),
-                        retryable=True,
+                    # Bright Data returned invalid/solve_failed — reCAPTCHA quota is
+                    # exhausted for this IP.  Try CapSolver as a fallback before
+                    # bailing out (CapSolver uses its own pool, not Bright Data's).
+                    print(
+                        "   🔄 Bright Data reCAPTCHA hard-failed — "
+                        "trying CapSolver as fallback..."
                     )
-                if captcha_status != "solved":
-                    # not_detected / timeout / unknown — button won't be enabled by the
-                    # normal captcha path; jump straight to force-enable inside
-                    # click_rex_verification_continue.
-                    print("   ⚡ Captcha not solved by Bright Data — using force-enable path directly")
+                    if not await self._try_capsolver_rex(page, remaining_seconds):
+                        return SearchOutcome(
+                            False,
+                            STATUS_BLOCKED,
+                            (
+                                f"Rex reCAPTCHA hard-failed (invalid/solve_failed) on loop "
+                                f"{total_verification_loops}/{max_total_verification} — "
+                                "Bright Data quota exhausted and CapSolver fallback also failed"
+                            ),
+                            retryable=True,
+                        )
+                    # CapSolver injected a valid token — fall through to click Continue
+                elif captcha_status != "solved":
+                    # not_detected / timeout / unknown — Bright Data didn't solve it.
+                    # Try CapSolver before falling back to the force-enable workaround.
+                    print("   🔄 Bright Data did not solve captcha — trying CapSolver fallback...")
+                    if not await self._try_capsolver_rex(page, remaining_seconds):
+                        print("   ⚡ CapSolver also unavailable — using force-enable path directly")
                 if await self.click_rex_verification_continue(page, timeout=click_timeout):
                     verification_disabled_loops = 0
                     try:
