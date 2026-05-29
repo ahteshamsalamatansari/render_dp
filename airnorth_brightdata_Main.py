@@ -27,6 +27,7 @@ import json
 import logging
 import os
 import random
+import re
 import sys
 import time
 from dataclasses import dataclass, replace
@@ -122,6 +123,23 @@ BRIGHTDATA_FATAL_THRESHOLD = int(os.getenv("BRIGHTDATA_FATAL_THRESHOLD", "2"))
 MAX_RETRY_PASSES = int(os.getenv("AIRNORTH_MAX_RETRY_PASSES", "3"))
 RETRY_PASS_DELAY_S  = [30, 60, 120]   # seconds to wait before each retry pass
 RETRY_PASS_WORKERS  = [4, 2, 1]       # workers per retry pass
+
+# ── CapSolver CAPTCHA bypass ──────────────────────────
+# API key is hard-coded as a fallback; override with CAPSOLVER_API_KEY env var.
+CAPSOLVER_API_KEY = os.getenv(
+    "CAPSOLVER_API_KEY",
+    "CAP-D9EC80AA2D25FEB038515477B6B0F668AFE90492C3A19ECA7EFF0D31969EE410",
+)
+CAPSOLVER_BASE_URL = "https://api.capsolver.com"
+CAPSOLVER_MAX_POLLS = 40          # 40 × 3 s = up to 2 minutes waiting
+CAPSOLVER_POLL_INTERVAL_S = 3.0
+CAPSOLVER_REQUEST_TIMEOUT_S = 30
+
+# Optional: Brightdata HTTPS proxy URL so CapSolver's cf_clearance is bound to
+# the same Brightdata exit IP that subsequent requests go through.
+# Format: http://brd-customer-XXXX-zone-XXXX:PASSWORD@brd.superproxy.io:22225
+# Leave blank to skip AntiCloudflareTask (Turnstile/reCAPTCHA still work proxyless).
+BRIGHTDATA_PROXY_URL = os.getenv("BRIGHTDATA_PROXY_URL", "")
 
 
 # ══════════════════════════════════════════════════════
@@ -405,6 +423,267 @@ async def verify_brightdata(client: BrightDataClient, cfg: Config, session=None)
             )
 
     raise BrightDataUnavailable(str(last_error) if last_error else "Brightdata check failed")
+
+
+# ══════════════════════════════════════════════════════
+# CapSolver — CAPTCHA / Cloudflare challenge bypass
+# ══════════════════════════════════════════════════════
+
+
+def _detect_captcha_type(html: str) -> str:
+    """
+    Identify the kind of challenge served on a blocked page.
+
+    Returns one of:
+        "turnstile"    – Cloudflare Turnstile widget
+        "recaptcha_v3" – reCAPTCHA v3 (invisible, score-based)
+        "recaptcha_v2" – reCAPTCHA v2 checkbox / invisible
+        "hcaptcha"     – hCaptcha
+        "cloudflare"   – Cloudflare 5-second / JS challenge (no widget)
+        "unknown"      – no recognised challenge found
+    """
+    sample = html[:8000].lower()
+    if "cf-turnstile" in sample or ("turnstile" in sample and "cloudflare" in sample):
+        return "turnstile"
+    if "recaptcha/api.js?render=" in sample or "grecaptcha.execute" in sample:
+        return "recaptcha_v3"
+    if "g-recaptcha" in sample or "recaptcha/api.js" in sample:
+        return "recaptcha_v2"
+    if "hcaptcha.com" in sample or "h-captcha" in sample:
+        return "hcaptcha"
+    if "just a moment" in sample or "cf-challenge-running" in sample or "cf_chl_jschl_tk" in sample:
+        return "cloudflare"
+    return "unknown"
+
+
+def _extract_sitekey(html: str) -> Optional[str]:
+    """Extract the CAPTCHA/widget site key from page source."""
+    for pattern in (
+        r'data-sitekey=["\']([^"\']{10,})["\']',
+        r'"sitekey"\s*:\s*"([^"]{10,})"',
+        r"'sitekey'\s*:\s*'([^']{10,})'",
+        r"sitekey=[\"']([^\"']{10,})[\"']",
+    ):
+        m = re.search(pattern, html)
+        if m:
+            return m.group(1)
+    return None
+
+
+async def _capsolver_post(session, endpoint: str, payload: dict) -> Optional[dict]:
+    """POST to a CapSolver endpoint; return parsed JSON or None on failure."""
+    if aiohttp is None:
+        return None
+    try:
+        async with session.post(
+            f"{CAPSOLVER_BASE_URL}/{endpoint}",
+            json=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=aiohttp.ClientTimeout(total=CAPSOLVER_REQUEST_TIMEOUT_S),
+        ) as resp:
+            return await resp.json(content_type=None)
+    except Exception as exc:
+        logging.warning("CapSolver %s request failed: %s", endpoint, exc)
+        return None
+
+
+async def _capsolver_create_task(session, task: dict) -> Optional[str]:
+    """Submit a CapSolver task; return taskId or None."""
+    data = await _capsolver_post(session, "createTask", {
+        "clientKey": CAPSOLVER_API_KEY,
+        "task": task,
+    })
+    if not data:
+        return None
+    if data.get("errorId", 0) != 0:
+        logging.warning(
+            "CapSolver createTask error [%s]: %s",
+            data.get("errorCode", "?"),
+            data.get("errorDescription", data),
+        )
+        return None
+    return data.get("taskId")
+
+
+async def _capsolver_poll(session, task_id: str) -> Optional[dict]:
+    """
+    Poll getTaskResult until status is 'ready' or 'failed'.
+    Returns the solution dict, or None on failure/timeout.
+    """
+    payload = {"clientKey": CAPSOLVER_API_KEY, "taskId": task_id}
+    for poll_num in range(CAPSOLVER_MAX_POLLS):
+        await asyncio.sleep(CAPSOLVER_POLL_INTERVAL_S)
+        data = await _capsolver_post(session, "getTaskResult", payload)
+        if not data:
+            continue
+        if data.get("errorId", 0) != 0:
+            logging.warning(
+                "CapSolver poll error [%s]: %s",
+                data.get("errorCode", "?"),
+                data.get("errorDescription", data),
+            )
+            return None
+        status = data.get("status", "")
+        if status == "ready":
+            return data.get("solution")
+        if status == "failed":
+            logging.warning("CapSolver task failed: %s", data)
+            return None
+        # status == "processing" — keep polling
+    logging.warning(
+        "CapSolver task %s timed out after %s polls (%ss)",
+        task_id,
+        CAPSOLVER_MAX_POLLS,
+        int(CAPSOLVER_MAX_POLLS * CAPSOLVER_POLL_INTERVAL_S),
+    )
+    return None
+
+
+async def capsolver_bypass(session, html: str, page_url: str) -> Optional[dict]:
+    """
+    Detect the challenge type in *html* and submit it to CapSolver.
+
+    The returned dict (if any) may contain:
+        "token"      → g-recaptcha-response / hCaptcha / Turnstile token
+        "cookies"    → {"cf_clearance": "..."} and other cookies
+        "userAgent"  → UA string that MUST be used with the returned cookies
+
+    Returns None when the challenge cannot be identified or CapSolver fails.
+    """
+    if not CAPSOLVER_API_KEY or aiohttp is None:
+        return None
+
+    captcha_type = _detect_captcha_type(html)
+    site_key = _extract_sitekey(html)
+
+    logging.info(
+        "CapSolver: challenge=%s  sitekey=%s  url=%s",
+        captcha_type,
+        site_key or "n/a",
+        page_url,
+    )
+
+    task: Optional[dict] = None
+
+    if captcha_type == "turnstile":
+        task = {
+            "type": "AntiTurnstileTaskProxyLess",
+            "websiteURL": page_url,
+            "websiteKey": site_key or "",
+            "metadata": {"action": ""},
+        }
+
+    elif captcha_type == "recaptcha_v2":
+        task = {
+            "type": "ReCaptchaV2TaskProxyLess",
+            "websiteURL": page_url,
+            "websiteKey": site_key or "",
+        }
+
+    elif captcha_type == "recaptcha_v3":
+        task = {
+            "type": "ReCaptchaV3TaskProxyLess",
+            "websiteURL": page_url,
+            "websiteKey": site_key or "",
+            "pageAction": "submit",
+            "minScore": 0.5,
+        }
+
+    elif captcha_type == "hcaptcha":
+        task = {
+            "type": "HCaptchaTaskProxyLess",
+            "websiteURL": page_url,
+            "websiteKey": site_key or "",
+        }
+
+    elif captcha_type == "cloudflare":
+        if BRIGHTDATA_PROXY_URL:
+            # Use Brightdata as the proxy so the returned cf_clearance is
+            # bound to the same exit IP that subsequent Brightdata requests use.
+            task = {
+                "type": "AntiCloudflareTask",
+                "websiteURL": page_url,
+                "proxy": BRIGHTDATA_PROXY_URL,
+            }
+        else:
+            logging.warning(
+                "CapSolver: Cloudflare 5-sec challenge detected but BRIGHTDATA_PROXY_URL "
+                "is not set. cf_clearance requires a matching proxy — skipping this solve. "
+                "Set BRIGHTDATA_PROXY_URL=http://user:pass@brd.superproxy.io:22225 to enable."
+            )
+            return None
+
+    else:
+        logging.warning(
+            "CapSolver: unrecognised challenge type '%s' on %s — skipping",
+            captcha_type,
+            page_url,
+        )
+        return None
+
+    task_id = await _capsolver_create_task(session, task)
+    if not task_id:
+        return None
+
+    logging.info("CapSolver: task %s submitted (type=%s)", task_id, task["type"])
+    solution = await _capsolver_poll(session, task_id)
+    if solution:
+        logging.info("CapSolver: task %s solved ✓", task_id)
+    else:
+        logging.warning("CapSolver: task %s could not be solved", task_id)
+    return solution
+
+
+async def _fetch_with_capsolver_cookies(
+    client: BrightDataClient,
+    url: str,
+    session,
+    extra_cookies: dict,
+    override_ua: str,
+) -> Optional[str]:
+    """
+    Re-fetch *url* through Brightdata, injecting CapSolver-provided cookies
+    (e.g. cf_clearance) and optionally overriding the User-Agent header.
+    Returns the response body or None on failure.
+    """
+    if aiohttp is None or session is None:
+        return None
+
+    merged_headers = {**BROWSER_HEADERS}
+    if override_ua:
+        merged_headers["User-Agent"] = override_ua
+    if extra_cookies:
+        merged_headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in extra_cookies.items())
+
+    payload = {
+        "zone": client.zone,
+        "url": url,
+        "format": client.response_format,
+        "method": "GET",
+        "headers": merged_headers,
+    }
+    if client.country:
+        payload["country"] = client.country
+
+    try:
+        async with session.post(
+            client.api_url,
+            json=payload,
+            headers={
+                "Authorization": brightdata_auth_header(client.token),
+                "Content-Type": "application/json",
+            },
+            timeout=aiohttp.ClientTimeout(total=BRIGHTDATA_REQUEST_TIMEOUT_S),
+        ) as resp:
+            if resp.status < 200 or resp.status >= 300:
+                logging.warning(
+                    "CapSolver retry fetch returned HTTP %s for %s", resp.status, url
+                )
+                return None
+            return await resp.text(errors="replace")
+    except Exception as exc:
+        logging.warning("CapSolver retry fetch failed: %s", exc)
+        return None
 
 
 # ══════════════════════════════════════════════════════
@@ -859,6 +1138,67 @@ async def scrape_job_with_brightdata(
 
             if looks_blocked(title, html):
                 last_error = "Blocked/challenge page returned by Brightdata"
+                logging.warning(
+                    "Blocked page detected for %s (attempt %s) — invoking CapSolver",
+                    job.key, attempt,
+                )
+
+                # ── CapSolver bypass ──────────────────────────────────────
+                if session and CAPSOLVER_API_KEY:
+                    cs_solution = await capsolver_bypass(session, html, url)
+                    if cs_solution:
+                        _cs_cookies = cs_solution.get("cookies") or {}
+                        _cs_ua      = (
+                            cs_solution.get("userAgent")
+                            or cs_solution.get("user_agent")
+                            or ""
+                        )
+                        _cs_token   = cs_solution.get("token") or ""
+
+                        if _cs_cookies or _cs_token:
+                            logging.info(
+                                "CapSolver provided solution for %s "
+                                "(cookies=%s token=%s) — retrying via Brightdata",
+                                job.key, bool(_cs_cookies), bool(_cs_token),
+                            )
+                            _cs_html = await _fetch_with_capsolver_cookies(
+                                client, url, session, _cs_cookies, _cs_ua
+                            )
+                            if _cs_html and not looks_blocked("", _cs_html):
+                                # Replace html so the parse step below processes
+                                # the unblocked page on this same attempt.
+                                html = _cs_html
+                                # Fall through to parse_flights below.
+                                flights = parse_flights(html)
+                                if flights:
+                                    rows = build_rows(
+                                        job=job,
+                                        flights=flights,
+                                        date_checked=date_checked,
+                                        time_checked=time_checked,
+                                    )
+                                    return {
+                                        "ok": True,
+                                        "status": "OK",
+                                        "provider": provider_name + "+CapSolver",
+                                        "attempt": attempt,
+                                        "rows": rows,
+                                        "error": None,
+                                    }
+                                else:
+                                    last_error = "Parser empty after CapSolver solve"
+                                    logging.warning(
+                                        "Parse empty after CapSolver for %s — HTML: %s",
+                                        job.key,
+                                        html[:400].replace("\n", " ").strip(),
+                                    )
+                            else:
+                                logging.warning(
+                                    "CapSolver retry still blocked or empty for %s",
+                                    job.key,
+                                )
+                # ─────────────────────────────────────────────────────────
+
                 if await interruptible_async_sleep(retry_delay_seconds(attempt), lambda: stop_requested(cfg)):
                     break
                 continue
