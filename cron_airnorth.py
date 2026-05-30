@@ -200,7 +200,7 @@ def run_route(route: dict) -> dict:
     name      = route["name"]
     route_arg = route["route_arg"]
     label     = route["label"]
-    cmd       = ["python", "airnorth_brightdata_Main.py", "--route", route_arg, "--workers", "16"]
+    cmd       = ["python", "airnorth_brightdata_Main.py", "--route", route_arg, "--workers", "8"]
 
     log(f"{'━' * 55}")
     log(f"🚀 Starting {name}...")
