@@ -1,17 +1,17 @@
 """
-Rex Airlines Flight Scraper — TIME FIX v2
-==========================================
-FIX 1: normalise_time() ab sirf raw time return karta hai — koi conversion nahi.
-        Website pe jo time hai (9:50am, 1:35pm) wahi Excel mein jayega.
+Rex Airlines Flight Scraper
+============================
+FIX 1: normalise_time() returns the raw website time as-is — no conversion.
+        Website times (9:50am, 1:35pm) are written directly to Excel.
 
-FIX 2: Same time bug fixed — har ZL number ke BAAD ka PEHLA time lega.
-        Pehle ZL ke aas-paas (pehle + baad) dono side scan hoti thi,
-        jis se dono flights ko same time milta tha.
-        Ab sirf ZL ke BAAD wali window scan hogi departure time ke liye.
+FIX 2: Same-time bug fixed — takes the FIRST time AFTER each ZL number.
+        Previously scanned both sides around the ZL number,
+        causing both flights to get the same time.
+        Now only the window AFTER the ZL is scanned for departure time.
 
 Routes (confirmed):
-  PER ↔ ALH  PER ↔ EPR  PER ↔ CVQ
-  PER ↔ MJK  CVQ ↔ MJK
+  PER <-> ALH  PER <-> EPR  PER <-> CVQ
+  PER <-> MJK  CVQ <-> MJK
 """
 
 import asyncio
@@ -182,7 +182,7 @@ ALL_ROUTES = [
 
 CONNECTING_ROUTES = {("CVQ", "MJK"), ("MJK", "CVQ")}
 
-# Yeh routes Rex pe ribbon nahi dikhate — hamesha fresh search karenge
+# These routes do not show a ribbon on Rex — always use fresh search
 NO_RIBBON_ROUTES = set()
 
 TOTAL_DAYS = int(os.getenv("REX_TOTAL_DAYS", "84"))
@@ -305,16 +305,12 @@ def route_date_key(run_id: str, origin: str, dest: str, date_str: str) -> tuple[
 
 
 def normalise_time(raw: str) -> str:
-    """
-    FIX 1: Koi conversion nahi — website ka raw time as-is return karo.
-    e.g. "9:50am" stays "9:50am"  |  "1:35pm" stays "1:35pm"
-    Sirf whitespace trim karo.
-    """
+    """Return the raw website time as-is (no conversion), just strip whitespace."""
     return raw.strip()
 
 
 def extract_all_times_from_text(text: str) -> list[str]:
-    """Card text se saare times (12hr ya 24hr) order mein nikalo."""
+    """Extract all times (12hr or 24hr) from card text in order."""
     times = re.findall(r'\d{1,2}:\d{2}\s*[aApP][mM]', text)
     if times:
         return [t.strip() for t in times]
@@ -323,20 +319,20 @@ def extract_all_times_from_text(text: str) -> list[str]:
 
 def extract_times_per_zl(card_text: str) -> dict[str, str]:
     """
-    FINAL FIX: Rex card text mein time order hamesha yeh hoti hai:
+    Time order in Rex card text is always:
       dep_time_1  arr_time_1  ZL_XXXX ...
       dep_time_2  arr_time_2  ZL_YYYY ...
 
-    Toh card mein saare times collect karo.
-    Har N-ve ZL ko times[N*2] milega (0-indexed departure times).
+    Collect all times from the card.
+    The N-th ZL gets times[N*2] (0-indexed departure times).
 
     Example:
       times = [9:50am, 12:00pm, 1:35pm, 3:35pm]
-      ZL2417 (index 0) → times[0] = 9:50am  ✅
-      ZL2268 (index 1) → times[2] = 1:35pm  ✅
+      ZL2417 (index 0) -> times[0] = 9:50am
+      ZL2268 (index 1) -> times[2] = 1:35pm
 
-    Safe fallback: agar times ka count ZL count se match na kare, toh
-    available times sequential assign ho jaate hain bina crash ke.
+    Safe fallback: if times count doesn't match ZL count,
+    available times are assigned sequentially without crashing.
     """
     all_times = extract_all_times_from_text(card_text)
     zl_matches = list(re.finditer(r'ZL\s?\d{3,4}', card_text))
@@ -548,10 +544,10 @@ class OutputStore:
             ws.append([row.get(field, "") for field in headers])
             self._entries_since_checkpoint += 1
 
-        # ── CHECKPOINT: har 7 entries ke baad Excel force-save ──
+        # ── CHECKPOINT: force-save Excel every N entries ──
         if self._entries_since_checkpoint >= CHECKPOINT_EVERY:
             self._save_atomic(wb)
-            print(f"   💾 Checkpoint: {self._entries_since_checkpoint} entries ke baad Excel save kiya → {self.path}")
+            print(f"   Checkpoint: saved {self._entries_since_checkpoint} entries -> {self.path}")
             self._entries_since_checkpoint = 0
         else:
             self._save_atomic(wb)
@@ -887,12 +883,12 @@ class RexScraper:
 
     async def _force_enable_rex_continue(self, page) -> bool:
         """
-        reCAPTCHA quota exceeded hone pe Google callback kabhi fire nahi karta,
-        isliye button.availCont hamesha disabled rehta hai.
-        Yeh function Rex ka captcha callback replicate karta hai via JS:
-          - #txtcaptcha value = 'captchad'  (Rex internally check karta hai)
-          - button.availCont ka 'disabled' attribute JS se remove karta hai
-        Isse bina valid Google token ke bhi Continue click ho sakta hai.
+        When reCAPTCHA quota is exceeded, Google's callback never fires,
+        so button.availCont stays disabled permanently.
+        This function replicates Rex's captcha callback via JS:
+          - Sets #txtcaptcha value to 'captchad' (Rex checks this internally)
+          - Removes the 'disabled' attribute from button.availCont via JS
+        This allows Continue to be clicked without a valid Google token.
         """
         try:
             enabled = await page.evaluate(
@@ -2052,7 +2048,7 @@ class RexScraper:
               f"(ribbon cutoff pos: {ribbon_end})")
 
         flights_raw = []
-        # Body scan: saare times collect karo ribbon ke baad
+        # Body scan: collect all times from the text after the ribbon
         body_after_ribbon = full_body[ribbon_end:]
         all_body_times = extract_all_times_from_text(body_after_ribbon)
         zl_in_body = [m for m in zl_matches if m.start() >= ribbon_end]
@@ -2170,7 +2166,7 @@ class RexScraper:
         append_rows(rows)
 
     # ─────────────────────────────────────────────────────────
-    #  FRESH SEARCH (jab ribbon mein date nahi milti)
+    #  FRESH SEARCH (fallback when date is not found in ribbon)
     # ─────────────────────────────────────────────────────────
     async def submit_search_form(self, page) -> bool:
         submit_selector = "#ContentPlaceHolder1_BookingHomepageV21_SubmitBooking"
@@ -2680,7 +2676,7 @@ class RexScraper:
 
             self._last_ribbon_price = ""
 
-            # ── Step 1: Ribbon se try karo ───────────────────
+            # ── Step 1: Try ribbon first ─────────────────────
             tab_result = "not_found"
             for attempt in range(30):
                 tab_result = await self.click_ribbon_tab(page, target_dt)
@@ -2696,9 +2692,9 @@ class RexScraper:
             else:
                 tab_result = "not_found"
 
-            # ── Step 2: Ribbon nahi mili → fresh search ──────
+            # ── Step 2: Ribbon not found → fresh search ──────
             if tab_result in ("not_found", "ribbon_end"):
-                print(f"   🔄 Ribbon mein date nahi mili — fresh search karta hoon...")
+                print(f"   Date not found in ribbon — falling back to fresh search...")
                 outcome = await self.do_fresh_search(
                     page, origin_code, dest_code, target_dt
                 )
@@ -2712,14 +2708,14 @@ class RexScraper:
                         date_str, origin_code, dest_code, outcome.status, outcome.reason
                     )])
                     continue
-                # Fresh search ke baad ribbon se ek baar aur try
+                # After fresh search, try ribbon one more time
                 tab_result_after = await self.click_ribbon_tab(page, target_dt)
                 if tab_result_after == "unavailable":
-                    print("   ❌ Fresh search ke baad bhi unavailable — 'no flight'")
+                    print("   Still unavailable after fresh search -- marking as no flight")
                     append_rows([self._no_flight(date_str, origin_code, dest_code)])
                     continue
-                # 'clicked' ya 'not_found' — direct extract karo (page already loaded)
-                print(f"   ℹ️  Fresh search ke baad tab_result={tab_result_after} — extracting directly")
+                # 'clicked' or 'not_found' -- extract directly (page already loaded)
+                print(f"   Fresh search done, tab_result={tab_result_after} -- extracting directly")
 
             elif tab_result == "unavailable":
                 print("   ❌ No flight → 'no flight'")
@@ -2770,7 +2766,7 @@ class RexScraper:
 
             self._last_ribbon_price = ""
 
-            # Ribbon nahi — seedha fresh search
+            # No ribbon — go straight to fresh search
             outcome = await self.do_fresh_search(
                 page, origin_code, dest_code, target_dt
             )
@@ -3884,10 +3880,7 @@ def parse_args():
 
 
 def interactive_route_selection() -> list[tuple[str, str]]:
-    """
-    Interactive route selector — runs when no route args given on command line.
-    User specific routes ya ALL choose kar sakta hai.
-    """
+    """Interactive route selector — runs when no route args given on command line."""
     print("\n" + "═" * 60)
     print("  REX AIRLINES SCRAPER — ROUTE SELECTION")
     print("═" * 60)
@@ -3909,7 +3902,7 @@ def interactive_route_selection() -> list[tuple[str, str]]:
         try:
             selections = [int(t) for t in tokens]
         except ValueError:
-            print("  ❌ Invalid input — sirf numbers enter karo.\n")
+            print("  Invalid input — please enter numbers only.\n")
             continue
 
         if selections == [0]:
@@ -3918,7 +3911,7 @@ def interactive_route_selection() -> list[tuple[str, str]]:
 
         bad = [s for s in selections if s < 1 or s > len(ALL_ROUTES)]
         if bad:
-            print(f"  ❌ Invalid number(s): {bad}. 1–{len(ALL_ROUTES)} range mein hona chahiye.\n")
+            print(f"  Invalid number(s): {bad}. Must be in range 1-{len(ALL_ROUTES)}.\n")
             continue
 
         chosen = [ALL_ROUTES[s - 1] for s in selections]
@@ -3929,7 +3922,7 @@ def interactive_route_selection() -> list[tuple[str, str]]:
         confirm = input("  Confirm? (y/n): ").strip().lower()
         if confirm in {"y", "yes", ""}:
             return chosen
-        print("  Re-select karo.\n")
+        print("  Please re-select.\n")
 
 
 if __name__ == "__main__":
@@ -3940,7 +3933,7 @@ if __name__ == "__main__":
         sys.exit(0)
 
     # ── ROUTE SELECTION ──────────────────────────────────────────
-    # Agar command line pe koi route nahi diya, interactive menu show karo
+    # If no routes given on command line, show interactive menu
     cli_has_routes = bool(ns.route_codes or ns.routes)
     if cli_has_routes:
         try:
@@ -3951,7 +3944,7 @@ if __name__ == "__main__":
             sys.exit(1)
         bad_routes = [route for route in routes_to_run if route not in ALL_ROUTES]
         if bad_routes:
-            print(f"❌ Route(s) list mein nahi hai: {bad_routes}")
+            print(f"Route(s) not in supported list: {bad_routes}")
             print_usage()
             sys.exit(1)
     else:
