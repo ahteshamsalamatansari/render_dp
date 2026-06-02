@@ -1,9 +1,8 @@
 """
 Cron: Qantas scraper + email
-Runs each of the 4 routes as a separate subprocess. If a route produces no stdout
-for 5 minutes (stall), it is killed and marked failed. After all 4 routes finish,
-any failed routes are retried once using alternate Brightdata credentials (if set).
-Emails all output files on completion.
+Runs qantas_playwright2ndJune.py (all 8 routes, built-in first-pass + retry).
+After completion, finds per-route xlsx files, counts no-price rows per route,
+and emails all files with a full per-route breakdown.
 """
 
 import os
@@ -31,34 +30,26 @@ EMAIL_TO       = os.getenv("EMAIL_TO", "ahteshamansari@bizprospex.com")
 SMTP_HOST = "smtp.gmail.com"
 SMTP_PORT = 587
 
-# Kill a route subprocess if no stdout line appears for this many seconds
-ROUTE_STALL_S      = 300   # 5 minutes
-INTER_ROUTE_WAIT_S = 20    # pause between routes
+SCRAPER_CMD = ["python", "qantas_playwright2ndJune.py"]
 
-# Route list: (route_num, origin, dest) — must match --route N in the scraper
+AIRPORT_NAMES = {
+    "BME": "Broome", "KNX": "Kununurra", "DRW": "Darwin",
+    "PER": "Perth",  "GET": "Geraldton",
+}
+
+# Must match ROUTES order in qantas_playwright2ndJune.py
 ROUTES = [
-    (1, "BME", "KNX"),
-    (2, "BME", "DRW"),
-    (3, "DRW", "KNX"),
-    (4, "KNX", "BME"),
-    (5, "PER", "GET"),
-    (6, "GET", "PER"),
-    (7, "DRW", "BME"),
-    (8, "KNX", "DRW"),
+    {"orig": "BME", "dest": "KNX"},
+    {"orig": "BME", "dest": "DRW"},
+    {"orig": "DRW", "dest": "KNX"},
+    {"orig": "KNX", "dest": "BME"},
+    {"orig": "PER", "dest": "GET"},
+    {"orig": "GET", "dest": "PER"},
+    {"orig": "DRW", "dest": "BME"},
+    {"orig": "KNX", "dest": "DRW"},
 ]
 
-# Maps route_num → (alt_zone_var, alt_pass_var, prim_zone_var, prim_pass_var)
-# On retry, prim vars are overridden with the alt values so the scraper picks them up
-ALT_CRED_MAP = {
-    1: ("QANTAS_ALT_BME_KNX_ZONE", "QANTAS_ALT_BME_KNX_PASS", "QANTAS_BME_KNX_ZONE", "QANTAS_BME_KNX_PASS"),
-    2: ("QANTAS_ALT_BME_DRW_ZONE", "QANTAS_ALT_BME_DRW_PASS", "QANTAS_BME_DRW_ZONE", "QANTAS_BME_DRW_PASS"),
-    3: ("QANTAS_ALT_DRW_KNX_ZONE", "QANTAS_ALT_DRW_KNX_PASS", "QANTAS_DRW_KNX_ZONE", "QANTAS_DRW_KNX_PASS"),
-    4: ("QANTAS_ALT_KNX_BME_ZONE", "QANTAS_ALT_KNX_BME_PASS", "QANTAS_KNX_BME_ZONE", "QANTAS_KNX_BME_PASS"),
-    5: ("QANTAS_ALT_PER_GET_ZONE",  "QANTAS_ALT_PER_GET_PASS",  "QANTAS_PER_GET_ZONE",  "QANTAS_PER_GET_PASS"),
-    6: ("QANTAS_ALT_GET_PER_ZONE",  "QANTAS_ALT_GET_PER_PASS",  "QANTAS_GET_PER_ZONE",  "QANTAS_GET_PER_PASS"),
-    7: ("QANTAS_ALT_DRW_BME_ZONE",  "QANTAS_ALT_DRW_BME_PASS",  "QANTAS_DRW_BME_ZONE",  "QANTAS_DRW_BME_PASS"),
-    8: ("QANTAS_ALT_KNX_DRW_ZONE",  "QANTAS_ALT_KNX_DRW_PASS",  "QANTAS_KNX_DRW_ZONE",  "QANTAS_KNX_DRW_PASS"),
-}
+NO_PRICE_CLASSES = {"No Direct Flight", "NO FLIGHTS", "SOLD OUT", "NO DATA"}
 
 # ── Helpers ─────────────────────────────────────────────
 
@@ -78,6 +69,38 @@ def format_duration(seconds: float) -> str:
     return f"{s}s"
 
 
+def route_label(orig: str, dest: str) -> str:
+    return (
+        f"{orig} -> {dest} "
+        f"({AIRPORT_NAMES.get(orig, orig)} -> {AIRPORT_NAMES.get(dest, dest)})"
+    )
+
+
+def stream_process(cmd: list, env: dict, timeout: float) -> tuple[int, str]:
+    output_lines: list[str] = []
+    proc = subprocess.Popen(
+        cmd, env=env,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, bufsize=1,
+    )
+
+    def _reader():
+        for line in proc.stdout:
+            print(line, end="", flush=True)
+            output_lines.append(line)
+
+    t = threading.Thread(target=_reader, daemon=True)
+    t.start()
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        t.join(timeout=5)
+        raise
+    t.join(timeout=5)
+    return proc.returncode, "".join(output_lines)
+
+
 def collect_output_files_since(since_ts: float) -> list[Path]:
     files = []
     if not OUTPUT_DIR.exists():
@@ -90,64 +113,191 @@ def collect_output_files_since(since_ts: float) -> list[Path]:
     return files
 
 
-def build_email_body(result: dict, files: list[Path]) -> str:
-    today = datetime.now().strftime("%A, %d %B %Y")
+# ── Per-route file analysis ──────────────────────────────
+
+def find_route_file(orig: str, dest: str, ext: str) -> "Path | None":
+    """Find the most recent Qantas_{orig}-{dest}_*.{ext} in output/."""
+    candidates = sorted(
+        OUTPUT_DIR.glob(f"Qantas_{orig}-{dest}_*.{ext}"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    return candidates[0] if candidates else None
+
+
+def _is_no_price(fare_price, fare_class: str) -> bool:
+    if fare_price is None:
+        return True
+    s = str(fare_price).strip()
+    if s in ("", "N/A", "No Data", "None", "nan"):
+        return True
+    if fare_class in NO_PRICE_CLASSES:
+        return True
+    try:
+        return float(s) == 0.0
+    except ValueError:
+        return False
+
+
+def analyse_route_xlsx(xlsx_path: Path) -> dict:
+    """Read route xlsx, count total rows and no-price rows."""
+    if not xlsx_path or not xlsx_path.exists():
+        return {"total": 0, "no_price": 0, "all_no_price": True}
+    try:
+        from openpyxl import load_workbook
+        wb  = load_workbook(xlsx_path, read_only=True, data_only=True)
+        ws  = wb.active
+        rows_iter = ws.iter_rows(values_only=True)
+        headers   = list(next(rows_iter, []))
+        try:
+            price_col = headers.index("Fare Price")
+            class_col = headers.index("Fare Class")
+        except ValueError:
+            wb.close()
+            return {"total": 0, "no_price": 0, "all_no_price": True}
+
+        total    = 0
+        no_price = 0
+        for row in rows_iter:
+            total += 1
+            fp = row[price_col] if price_col < len(row) else None
+            fc = str(row[class_col]) if class_col < len(row) and row[class_col] else ""
+            if _is_no_price(fp, fc):
+                no_price += 1
+
+        wb.close()
+        return {
+            "total":        total,
+            "no_price":     no_price,
+            "all_no_price": total == 0 or no_price == total,
+        }
+    except Exception as e:
+        log(f"  Could not read {xlsx_path.name}: {e}")
+        return {"total": 0, "no_price": 0, "all_no_price": True}
+
+
+def build_route_stats() -> list[dict]:
+    """Match each route to its output files and compute price coverage stats."""
+    stats = []
+    for r in ROUTES:
+        orig, dest = r["orig"], r["dest"]
+        xlsx       = find_route_file(orig, dest, "xlsx")
+        csv_file   = find_route_file(orig, dest, "csv")
+        fs         = analyse_route_xlsx(xlsx)
+
+        price_ok = fs["total"] - fs["no_price"]
+        pct      = (price_ok / fs["total"] * 100) if fs["total"] else 0
+        r_status = (
+            "FAILED - No File" if not xlsx else
+            "FAILED - No Data" if fs["all_no_price"] else
+            "PARTIAL"          if fs["no_price"] > 0 else
+            "OK"
+        )
+        log(
+            f"   {route_label(orig, dest)}: {fs['total']} rows, "
+            f"{price_ok} with price ({pct:.0f}%), {fs['no_price']} no price  [{r_status}]"
+        )
+        stats.append({
+            "orig":          orig,
+            "dest":          dest,
+            "label":         route_label(orig, dest),
+            "xlsx":          xlsx,
+            "csv":           csv_file if csv_file and csv_file.exists() else None,
+            "total_rows":    fs["total"],
+            "no_price_rows": fs["no_price"],
+            "all_no_price":  fs["all_no_price"],
+            "status":        r_status,
+        })
+    return stats
+
+
+# ── Email ────────────────────────────────────────────────
+
+def build_email_body(scraper_success: bool, duration: str, route_stats: list[dict]) -> str:
+    today   = datetime.now().strftime("%A, %d %B %Y")
+    any_bad = any(s["status"] != "OK" for s in route_stats)
+    overall = "FAILED" if (not scraper_success or any_bad) else "Completed"
     lines = [
-        f"Flight Scraper Report — {result['name']} — {today}",
-        "=" * 55, "",
+        f"Flight Scraper Report -- Qantas -- {today}",
+        "=" * 62, "",
+        f"Status   : {overall}",
+        f"Duration : {duration}",
+        f"Routes   : {len(route_stats)}",
+        "",
+        "-" * 62,
+        "Per-Route Breakdown",
+        "-" * 62,
     ]
-    status_icon = "✅" if result["success"] else "❌"
-    lines.append(f"{status_icon}  {result['name']}")
-    lines.append(f"    Status   : {'Completed' if result['success'] else 'FAILED'}")
-    lines.append(f"    Duration : {result['duration']}")
-    lines.append(f"    Routes   :")
-    for route in result["routes"]:
-        lines.append(f"      • {route}")
-    lines.append("")
-    lines.append("-" * 55)
-    if files:
-        lines.append(f"📎 Attached files ({len(files)}):")
-        for f in files:
+
+    for s in route_stats:
+        price_ok = s["total_rows"] - s["no_price_rows"]
+        pct      = (price_ok / s["total_rows"] * 100) if s["total_rows"] else 0
+        lines += [
+            f"  [{s['status']}] {s['label']}",
+            f"       File        : {s['xlsx'].name if s['xlsx'] else 'NOT FOUND'}",
+            f"       Total rows  : {s['total_rows']}",
+            f"       With price  : {price_ok}  ({pct:.0f}%)",
+            f"       No price    : {s['no_price_rows']}",
+            "",
+        ]
+
+    all_files = [
+        f for s in route_stats
+        for f in [s["xlsx"], s["csv"]]
+        if f and f.exists()
+    ]
+    if all_files:
+        lines += [
+            "-" * 62,
+            f"Attached files ({len(all_files)}):",
+        ]
+        for f in all_files:
             size_kb = f.stat().st_size / 1024
-            mtime = datetime.fromtimestamp(f.stat().st_mtime).strftime("%H:%M:%S")
-            rel = f.relative_to(OUTPUT_DIR) if str(f).startswith(str(OUTPUT_DIR)) else f.name
-            lines.append(f"  • {rel}  ({size_kb:.1f} KB, {mtime})")
+            lines.append(f"  - {f.name}  ({size_kb:.1f} KB)")
     else:
-        lines.append("⚠️  No output files were generated.")
+        lines.append("  No output files were generated.")
+
     lines.append("")
     return "\n".join(lines)
 
 
-def send_email(result: dict, files: list[Path]) -> None:
+def send_email(scraper_success: bool, duration: str, route_stats: list[dict]) -> None:
     if not EMAIL_PASSWORD:
-        log("⚠️  EMAIL_PASSWORD not set — skipping email.")
+        log("EMAIL_PASSWORD not set -- skipping email.")
         return
 
-    today = datetime.now().strftime("%Y-%m-%d")
-    status = "OK" if result["success"] else "FAILED"
-    subject = f"Qantas Scraper — {today} — {status}"
-    body = build_email_body(result, files)
+    any_bad = any(s["status"] != "OK" for s in route_stats)
+    today   = datetime.now().strftime("%Y-%m-%d")
+    status  = "FAILED" if (not scraper_success or any_bad) else "OK"
+    subject = f"Qantas Scraper -- {today} -- {status}"
+    body    = build_email_body(scraper_success, duration, route_stats)
 
     msg = MIMEMultipart()
-    msg["From"] = EMAIL_FROM
-    msg["To"] = EMAIL_TO
+    msg["From"]    = EMAIL_FROM
+    msg["To"]      = EMAIL_TO
     msg["Subject"] = subject
     msg.attach(MIMEText(body, "plain", "utf-8"))
 
-    for filepath in files:
-        try:
-            with open(filepath, "rb") as f:
-                part = MIMEBase("application", "octet-stream")
-                part.set_payload(f.read())
-            encoders.encode_base64(part)
-            rel = filepath.relative_to(OUTPUT_DIR) if str(filepath).startswith(str(OUTPUT_DIR)) else filepath.name
-            safe_name = str(rel).replace("\\", "/").replace("/", "_")
-            part.add_header("Content-Disposition", f"attachment; filename=\"{safe_name}\"")
-            msg.attach(part)
-        except Exception as e:
-            log(f"⚠️  Could not attach {filepath}: {e}")
+    for s in route_stats:
+        for filepath in [s["xlsx"], s["csv"]]:
+            if not filepath or not filepath.exists():
+                continue
+            try:
+                with open(filepath, "rb") as f:
+                    part = MIMEBase("application", "octet-stream")
+                    part.set_payload(f.read())
+                encoders.encode_base64(part)
+                part.add_header("Content-Disposition", f'attachment; filename="{filepath.name}"')
+                msg.attach(part)
+            except Exception as e:
+                log(f"Could not attach {filepath.name}: {e}")
 
-    log(f"📧 Sending email to {EMAIL_TO} ({len(files)} attachments)...")
+    total_attached = sum(
+        1 for s in route_stats
+        for f in [s["xlsx"], s["csv"]]
+        if f and f.exists()
+    )
+    log(f"Sending email to {EMAIL_TO} ({total_attached} attachments)...")
     try:
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
             server.ehlo()
@@ -155,193 +305,89 @@ def send_email(result: dict, files: list[Path]) -> None:
             server.ehlo()
             server.login(EMAIL_FROM, EMAIL_PASSWORD)
             server.send_message(msg)
-        log("✅ Email sent successfully!")
+        log("Email sent successfully!")
     except Exception as e:
-        log(f"❌ Email failed: {e}")
+        log(f"Email failed: {e}")
 
 
-# ── Per-route runner ────────────────────────────────────
+# ── Runner ───────────────────────────────────────────────
 
-def run_single_route(route_num: int, origin: str, dest: str,
-                     env: dict | None = None) -> tuple[bool, str]:
-    """
-    Run one Qantas route as a subprocess (--route N).
-    Kills the process if no stdout line appears for ROUTE_STALL_S seconds.
-    Returns (success, full_output_text).
-    """
-    cmd = ["python", "qantas_playwright_scraper.py", "--route", str(route_num)]
-    run_env = (env if env is not None else os.environ).copy()
-    run_env["PYTHONUNBUFFERED"] = "1"
-    run_env["TZ"] = "Australia/Perth"
-
-    log(f"▶ Route {route_num} ({origin}→{dest}): starting  [stall limit = {ROUTE_STALL_S}s]")
-    start = time.time()
-
-    proc = subprocess.Popen(
-        cmd, env=run_env,
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        text=True, bufsize=1,
-    )
-
-    output_lines: list[str] = []
-    last_line_ts = [time.time()]
-    stalled      = [False]
-
-    def _reader():
-        for line in proc.stdout:
-            print(line, end="", flush=True)
-            output_lines.append(line)
-            last_line_ts[0] = time.time()
-
-    t = threading.Thread(target=_reader, daemon=True)
-    t.start()
-
-    while proc.poll() is None:
-        time.sleep(5)
-        idle = time.time() - last_line_ts[0]
-        if idle >= ROUTE_STALL_S:
-            log(f"⏰ Route {route_num} ({origin}→{dest}): no output for {int(idle)}s — killing (stall)")
-            proc.kill()
-            stalled[0] = True
-            break
-
-    t.join(timeout=5)
-    duration = format_duration(time.time() - start)
-
-    if stalled[0]:
-        log(f"❌ Route {route_num} ({origin}→{dest}): stalled — {duration}")
-        return False, "".join(output_lines)
-
-    exit_code = proc.returncode if proc.returncode is not None else -1
-    success   = exit_code == 0
-    icon      = "✅" if success else "❌"
-    log(f"{icon} Route {route_num} ({origin}→{dest}): exit {exit_code} — {duration}")
-    return success, "".join(output_lines)
-
-
-# ── Alternate credential helpers ────────────────────────
-
-def build_alt_env(route_num: int) -> dict | None:
-    """
-    Return a copy of os.environ with alternate zone/pass injected for the given route,
-    or None if alternate credentials are not configured for that route.
-    """
-    alt_zone_var, alt_pass_var, prim_zone_var, prim_pass_var = ALT_CRED_MAP[route_num]
-    alt_zone = os.getenv(alt_zone_var, "").strip()
-    alt_pass = os.getenv(alt_pass_var, "").strip()
-    if not alt_zone or not alt_pass:
-        return None
-    env = os.environ.copy()
-    env[prim_zone_var] = alt_zone
-    env[prim_pass_var] = alt_pass
-    return env
-
-
-# ── Scraper orchestrator ────────────────────────────────
-
-def run_scraper() -> dict:
-    job_start = time.time()
-    results: dict[int, dict] = {}
-    failed:  list[int] = []
-
-    log(f"{'━' * 55}")
-    log(f"🚀 Starting Qantas — {len(ROUTES)} routes, sequential")
-    log(f"   Stall timeout per route : {ROUTE_STALL_S}s (5 min)")
+def run_scraper() -> tuple[bool, str]:
+    """Run qantas_playwright2ndJune.py — handles all 8 routes with built-in retry."""
+    log(f"{'=' * 55}")
+    log(f"Starting Qantas scraper...")
+    log(f"   Command : {' '.join(SCRAPER_CMD)}")
+    log(f"   Routes  : {len(ROUTES)} (scraper handles first-pass + retry internally)")
     log("")
 
-    # ── First pass: run all routes ────────────────────────
-    for i, (route_num, origin, dest) in enumerate(ROUTES):
-        success, _ = run_single_route(route_num, origin, dest)
-        results[route_num] = {
-            "origin": origin, "dest": dest,
-            "success": success, "attempt": "primary",
-        }
-        if not success:
-            failed.append(route_num)
-        if i < len(ROUTES) - 1:
-            log(f"⏳ Waiting {INTER_ROUTE_WAIT_S}s before next route...")
-            time.sleep(INTER_ROUTE_WAIT_S)
+    start = time.time()
+    try:
+        env = os.environ.copy()
+        env["PYTHONUNBUFFERED"] = "1"
+        env["TZ"] = "Australia/Perth"
 
-    # ── Retry pass: failed routes with alternate credentials
-    if failed:
-        retryable = [(n, build_alt_env(n)) for n in failed if build_alt_env(n) is not None]
-        if retryable:
-            log(f"\n{'━' * 55}")
-            log(f"🔁 Retrying {len(retryable)} failed route(s) with alternate credentials...")
-            for j, (route_num, alt_env) in enumerate(retryable):
-                origin   = results[route_num]["origin"]
-                dest     = results[route_num]["dest"]
-                alt_zone = alt_env.get(f"QANTAS_{origin}_{dest}_ZONE", "?")
-                log(f"   Route {route_num} ({origin}→{dest}): alt zone = {alt_zone}")
-                success, _ = run_single_route(route_num, origin, dest, env=alt_env)
-                results[route_num]["success"] = success
-                results[route_num]["attempt"] = "alternate"
-                if j < len(retryable) - 1:
-                    log(f"⏳ Waiting {INTER_ROUTE_WAIT_S}s before next retry...")
-                    time.sleep(INTER_ROUTE_WAIT_S)
+        returncode, _ = stream_process(SCRAPER_CMD, env, timeout=21600)  # 6h hard cap
+        duration = format_duration(time.time() - start)
+        success  = returncode == 0
+
+        if success:
+            log(f"Scraper completed in {duration}")
         else:
-            log(f"\n⚠️  {len(failed)} route(s) failed — no alternate credentials configured, skipping retry.")
+            log(f"Scraper finished with exit code {returncode} after {duration}")
+        return success, duration
 
-    all_success = all(r["success"] for r in results.values())
-    duration    = format_duration(time.time() - job_start)
+    except subprocess.TimeoutExpired:
+        duration = format_duration(time.time() - start)
+        log(f"Scraper hard-timeout after {duration}")
+        return False, duration
 
-    route_labels = [
-        f"{r['origin']} → {r['dest']} ({'✅' if r['success'] else '❌'} {r['attempt']})"
-        for r in results.values()
-    ]
-
-    return {
-        "name":     "Qantas",
-        "success":  all_success,
-        "exit_code": 0 if all_success else 1,
-        "duration": duration,
-        "routes":   route_labels,
-    }
+    except Exception as e:
+        duration = format_duration(time.time() - start)
+        log(f"Scraper crashed: {e}")
+        return False, duration
 
 
-# ── Entry point ─────────────────────────────────────────
+# ── Main ─────────────────────────────────────────────────
 
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="Qantas cron: scrape + email")
     parser.add_argument("--dry-run", action="store_true",
-                        help="Skip scraper, email existing files")
+                        help="Skip scraper, analyse existing files and email")
     args = parser.parse_args()
 
     log("=" * 55)
-    log("🗓️  Qantas Scraper Cron")
+    log("Qantas Scraper Cron")
     log(f"   Date  : {datetime.now().strftime('%A, %d %B %Y %H:%M %Z')}")
     log(f"   Mode  : {'DRY RUN' if args.dry_run else 'FULL RUN'}")
     log("=" * 55)
     log("")
 
-    job_start = time.time()
-
     if args.dry_run:
-        log("🔸 Dry run — skipping scraper.")
-        result = {
-            "name": "Qantas", "success": True, "exit_code": 0,
-            "duration": "dry-run",
-            "routes": [f"{o} → {d} (dry-run)" for _, o, d in ROUTES],
-        }
-        files = [f for f in OUTPUT_DIR.rglob("*")
-                 if f.is_file() and f.suffix.lower() in (".csv", ".xlsx")]
+        log("Dry run -- skipping scraper.")
+        scraper_success = True
+        duration        = "dry-run"
     else:
-        result = run_scraper()
-        files  = collect_output_files_since(job_start)
+        scraper_success, duration = run_scraper()
 
-    log(f"\n📁 Found {len(files)} output file(s).")
-    for f in files:
-        log(f"   • {f}")
+    log("\nAnalysing per-route output files...")
+    route_stats = build_route_stats()
 
-    send_email(result, files)
+    log(f"\nRoute Summary:")
+    log("=" * 55)
+    for s in route_stats:
+        log(f"  [{s['status']}] {s['label']}")
+    log("")
+
+    send_email(scraper_success, duration, route_stats)
 
     log("")
     log("=" * 55)
-    log(f"🏁 Done — {'Success' if result['success'] else 'FAILED'}")
+    any_bad = any(s["status"] != "OK" for s in route_stats)
+    log(f"Done -- {'FAILED' if (not scraper_success or any_bad) else 'Success'}")
     log("=" * 55)
 
-    if not result["success"]:
+    if not scraper_success or any_bad:
         sys.exit(1)
 
 
