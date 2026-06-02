@@ -1,8 +1,7 @@
 """
 Cron: Airnorth scraper + email
-Runs each Airnorth route one at a time and emails the output file as soon as
-that route finishes, so the client receives 4 separate emails with attachments
-rather than waiting for all routes to complete.
+Runs each Airnorth route one at a time. Collects all output files and
+sends ONE email at the end with all attachments and a per-route breakdown.
 """
 
 import os
@@ -35,39 +34,37 @@ RETRY_DELAY_S = 60
 RETRY_ERRORS  = ("Connection aborted.", "RemoteDisconnected")
 
 # ── Route definitions ──────────────────────────────────
-# Each route runs as its own subprocess so an email is sent as soon as it
-# finishes — the client gets data incrementally rather than all at once.
 
 ROUTES = [
     {
-        "name": "Airnorth BME → KNX",
+        "name": "Airnorth BME -> KNX",
         "route_arg": "BME-KNX",
-        "label": "BME → KNX (Broome → Kununurra)",
+        "label": "BME -> KNX (Broome -> Kununurra)",
     },
     {
-        "name": "Airnorth BME → DRW",
+        "name": "Airnorth BME -> DRW",
         "route_arg": "BME-DRW",
-        "label": "BME → DRW (Broome → Darwin)",
+        "label": "BME -> DRW (Broome -> Darwin)",
     },
     {
-        "name": "Airnorth DRW → KNX",
+        "name": "Airnorth DRW -> KNX",
         "route_arg": "DRW-KNX",
-        "label": "DRW → KNX (Darwin → Kununurra)",
+        "label": "DRW -> KNX (Darwin -> Kununurra)",
     },
     {
-        "name": "Airnorth DRW → BME",
+        "name": "Airnorth DRW -> BME",
         "route_arg": "DRW-BME",
-        "label": "DRW → BME (Darwin → Broome)",
+        "label": "DRW -> BME (Darwin -> Broome)",
     },
     {
-        "name": "Airnorth KNX → DRW",
+        "name": "Airnorth KNX -> DRW",
         "route_arg": "KNX-DRW",
-        "label": "KNX → DRW (Kununurra → Darwin)",
+        "label": "KNX -> DRW (Kununurra -> Darwin)",
     },
     {
-        "name": "Airnorth KNX → BME",
+        "name": "Airnorth KNX -> BME",
         "route_arg": "KNX-BME",
-        "label": "KNX → BME (Kununurra → Broome)",
+        "label": "KNX -> BME (Kununurra -> Broome)",
     },
 ]
 
@@ -122,76 +119,8 @@ def collect_output_files_since(since_ts: float) -> list[Path]:
         if item.is_file() and item.suffix.lower() in (".csv", ".xlsx"):
             if item.stat().st_mtime >= since_ts:
                 files.append(item)
-    files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+    files.sort(key=lambda f: f.stat().st_mtime)
     return files
-
-
-def build_email_body(result: dict, files: list[Path]) -> str:
-    today = datetime.now().strftime("%A, %d %B %Y")
-    lines = [
-        f"Flight Scraper Report — {result['name']} — {today}",
-        "=" * 55, "",
-    ]
-    status_icon = "✅" if result["success"] else "❌"
-    lines.append(f"{status_icon}  {result['name']}")
-    lines.append(f"    Status   : {'Completed' if result['success'] else 'FAILED'}")
-    lines.append(f"    Duration : {result['duration']}")
-    lines.append(f"    Route    : {result['label']}")
-    lines.append("")
-    lines.append("-" * 55)
-    if files:
-        lines.append(f"📎 Attached files ({len(files)}):")
-        for f in files:
-            size_kb = f.stat().st_size / 1024
-            mtime = datetime.fromtimestamp(f.stat().st_mtime).strftime("%H:%M:%S")
-            rel = f.relative_to(OUTPUT_DIR) if str(f).startswith(str(OUTPUT_DIR)) else f.name
-            lines.append(f"  • {rel}  ({size_kb:.1f} KB, {mtime})")
-    else:
-        lines.append("⚠️  No output files were generated.")
-    lines.append("")
-    return "\n".join(lines)
-
-
-def send_email(result: dict, files: list[Path]) -> None:
-    if not EMAIL_PASSWORD:
-        log("⚠️  EMAIL_PASSWORD not set — skipping email.")
-        return
-
-    today = datetime.now().strftime("%Y-%m-%d")
-    status = "OK" if result["success"] else "FAILED"
-    subject = f"Airnorth {result['route_arg']} — {today} — {status}"
-    body = build_email_body(result, files)
-
-    msg = MIMEMultipart()
-    msg["From"] = EMAIL_FROM
-    msg["To"] = EMAIL_TO
-    msg["Subject"] = subject
-    msg.attach(MIMEText(body, "plain", "utf-8"))
-
-    for filepath in files:
-        try:
-            with open(filepath, "rb") as f:
-                part = MIMEBase("application", "octet-stream")
-                part.set_payload(f.read())
-            encoders.encode_base64(part)
-            rel = filepath.relative_to(OUTPUT_DIR) if str(filepath).startswith(str(OUTPUT_DIR)) else filepath.name
-            safe_name = str(rel).replace("\\", "/").replace("/", "_")
-            part.add_header("Content-Disposition", f"attachment; filename=\"{safe_name}\"")
-            msg.attach(part)
-        except Exception as e:
-            log(f"⚠️  Could not attach {filepath}: {e}")
-
-    log(f"📧 Sending email to {EMAIL_TO} ({len(files)} attachments)...")
-    try:
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-            server.ehlo()
-            server.starttls()
-            server.ehlo()
-            server.login(EMAIL_FROM, EMAIL_PASSWORD)
-            server.send_message(msg)
-        log("✅ Email sent successfully!")
-    except Exception as e:
-        log(f"❌ Email failed: {e}")
 
 
 # ── Per-route runner ─────────────────────────────────────
@@ -202,8 +131,8 @@ def run_route(route: dict) -> dict:
     label     = route["label"]
     cmd       = ["python", "airnorth_brightdata_Main.py", "--route", route_arg, "--workers", "16"]
 
-    log(f"{'━' * 55}")
-    log(f"🚀 Starting {name}...")
+    log(f"{'=' * 55}")
+    log(f"Starting {name}...")
     log(f"   Route  : {label}")
     log(f"   Command: {' '.join(cmd)}")
     log("")
@@ -215,7 +144,7 @@ def run_route(route: dict) -> dict:
 
     for attempt in range(1, MAX_RETRIES + 1):
         if attempt > 1:
-            log(f"⟳  [{name}] Retry {attempt}/{MAX_RETRIES} — waiting {RETRY_DELAY_S}s...")
+            log(f"Retry {attempt}/{MAX_RETRIES} for {name} -- waiting {RETRY_DELAY_S}s...")
             time.sleep(RETRY_DELAY_S)
 
         try:
@@ -223,32 +152,32 @@ def run_route(route: dict) -> dict:
             env["PYTHONUNBUFFERED"] = "1"
 
             returncode, output = stream_process(cmd, env, timeout=7200)
-            elapsed  = time.time() - start
-            duration = format_duration(elapsed)
+            elapsed   = time.time() - start
+            duration  = format_duration(elapsed)
             exit_code = returncode
             success   = returncode == 0
 
             if success:
-                log(f"✅ {name} completed in {duration}")
+                log(f"{name} completed in {duration}")
                 break
 
-            log(f"❌ {name} failed (exit code {returncode}) after {duration}")
+            log(f"{name} failed (exit code {returncode}) after {duration}")
             if any(err in output for err in RETRY_ERRORS):
-                log("   ↳ Connection error detected — will retry.")
+                log("   Connection error -- will retry.")
                 if attempt < MAX_RETRIES:
                     continue
             break
 
         except subprocess.TimeoutExpired:
-            duration = format_duration(time.time() - start)
-            log(f"⏰ {name} timed out after {duration}")
+            duration  = format_duration(time.time() - start)
+            log(f"{name} timed out after {duration}")
             exit_code = -1
             success   = False
             break
 
         except Exception as e:
-            duration = format_duration(time.time() - start)
-            log(f"💥 {name} crashed: {e}")
+            duration  = format_duration(time.time() - start)
+            log(f"{name} crashed: {e}")
             exit_code = -1
             success   = False
             break
@@ -263,23 +192,109 @@ def run_route(route: dict) -> dict:
     }
 
 
+# ── Email ────────────────────────────────────────────────
+
+def build_email_body(route_results: list[dict], all_files: list[Path]) -> str:
+    today        = datetime.now().strftime("%A, %d %B %Y")
+    any_failed   = any(not r["success"] for r in route_results)
+    overall      = "FAILED (one or more routes)" if any_failed else "Completed"
+    lines = [
+        f"Flight Scraper Report -- Airnorth -- {today}",
+        "=" * 62, "",
+        f"Status   : {overall}",
+        f"Routes   : {len(route_results)}",
+        "",
+        "-" * 62,
+        "Per-Route Breakdown",
+        "-" * 62,
+    ]
+
+    for r in route_results:
+        r_status = "OK" if r["success"] else "FAILED"
+        lines += [
+            f"  [{r_status}] {r['label']}",
+            f"       Duration : {r['duration']}",
+            "",
+        ]
+
+    if all_files:
+        lines += [
+            "-" * 62,
+            f"Attached files ({len(all_files)}):",
+        ]
+        for f in all_files:
+            size_kb = f.stat().st_size / 1024
+            rel = f.relative_to(OUTPUT_DIR) if str(f).startswith(str(OUTPUT_DIR)) else f.name
+            lines.append(f"  - {rel}  ({size_kb:.1f} KB)")
+    else:
+        lines.append("  No output files were generated.")
+
+    lines.append("")
+    return "\n".join(lines)
+
+
+def send_email(route_results: list[dict], all_files: list[Path]) -> None:
+    if not EMAIL_PASSWORD:
+        log("EMAIL_PASSWORD not set -- skipping email.")
+        return
+
+    today       = datetime.now().strftime("%Y-%m-%d")
+    any_failed  = any(not r["success"] for r in route_results)
+    status      = "FAILED" if any_failed else "OK"
+    subject     = f"Airnorth Scraper -- {today} -- {status}"
+    body        = build_email_body(route_results, all_files)
+
+    msg = MIMEMultipart()
+    msg["From"]    = EMAIL_FROM
+    msg["To"]      = EMAIL_TO
+    msg["Subject"] = subject
+    msg.attach(MIMEText(body, "plain", "utf-8"))
+
+    for filepath in all_files:
+        try:
+            with open(filepath, "rb") as f:
+                part = MIMEBase("application", "octet-stream")
+                part.set_payload(f.read())
+            encoders.encode_base64(part)
+            rel = filepath.relative_to(OUTPUT_DIR) if str(filepath).startswith(str(OUTPUT_DIR)) else filepath.name
+            safe_name = str(rel).replace("\\", "/").replace("/", "_")
+            part.add_header("Content-Disposition", f'attachment; filename="{safe_name}"')
+            msg.attach(part)
+        except Exception as e:
+            log(f"Could not attach {filepath}: {e}")
+
+    log(f"Sending email to {EMAIL_TO} ({len(all_files)} attachments)...")
+    try:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+            server.ehlo()
+            server.starttls()
+            server.ehlo()
+            server.login(EMAIL_FROM, EMAIL_PASSWORD)
+            server.send_message(msg)
+        log("Email sent successfully!")
+    except Exception as e:
+        log(f"Email failed: {e}")
+
+
 # ── Main ────────────────────────────────────────────────
 
 def main():
     import argparse
-    parser = argparse.ArgumentParser(description="Airnorth cron: scrape all routes + email per route")
+    parser = argparse.ArgumentParser(description="Airnorth cron: scrape all routes + single email")
     parser.add_argument("--dry-run", action="store_true", help="Skip scrapers, email existing files")
     args = parser.parse_args()
 
     log("=" * 55)
-    log("🗓️  Airnorth Scraper Cron")
+    log("Airnorth Scraper Cron")
     log(f"   Date  : {datetime.now().strftime('%A, %d %B %Y %H:%M %Z')}")
     log(f"   Mode  : {'DRY RUN' if args.dry_run else 'FULL RUN'}")
     log(f"   Routes: {len(ROUTES)}")
     log("=" * 55)
     log("")
 
-    any_failed = False
+    job_start     = time.time()
+    route_results = []
+    any_failed    = False
 
     for i, route in enumerate(ROUTES, 1):
         log(f"[Route {i}/{len(ROUTES)}] {route['label']}")
@@ -295,26 +310,44 @@ def main():
                 "exit_code": 0,
                 "duration":  "dry-run",
             }
-            files = [
-                f for f in OUTPUT_DIR.rglob("*")
-                if f.is_file() and f.suffix.lower() in (".csv", ".xlsx")
-            ]
         else:
             result = run_route(route)
-            files  = collect_output_files_since(route_start)
 
-        log(f"\n📁 Found {len(files)} output file(s) for {route['name']}.")
-        for f in files:
-            log(f"   • {f}")
-
-        send_email(result, files)
-        log("")
+        route_results.append(result)
 
         if not result["success"]:
             any_failed = True
 
+        log("")
+
+    # Collect ALL files generated since the job started
+    if args.dry_run:
+        all_files = [
+            f for f in OUTPUT_DIR.rglob("*")
+            if f.is_file() and f.suffix.lower() in (".csv", ".xlsx")
+        ]
+    else:
+        all_files = collect_output_files_since(job_start)
+
+    log(f"Total output files: {len(all_files)}")
+    for f in all_files:
+        log(f"   - {f}")
+    log("")
+
+    # Route summary
     log("=" * 55)
-    log(f"🏁 Done — {'FAILED (one or more routes)' if any_failed else 'All routes succeeded'}")
+    log("Route Summary")
+    log("=" * 55)
+    for r in route_results:
+        tag = "OK" if r["success"] else "FAILED"
+        log(f"  [{tag}] {r['label']}  ({r['duration']})")
+    log("")
+
+    send_email(route_results, all_files)
+
+    log("")
+    log("=" * 55)
+    log(f"Done -- {'FAILED (one or more routes)' if any_failed else 'All routes succeeded'}")
     log("=" * 55)
 
     if any_failed:
