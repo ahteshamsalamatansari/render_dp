@@ -62,8 +62,19 @@ def route_label(orig: str, dest: str) -> str:
 
 # ── Helpers ─────────────────────────────────────────────
 
+def _au_now() -> datetime:
+    """Current time in Australian (Perth) timezone — matches the cron TZ env.
+    Falls back to UTC+8 manually if zoneinfo / tzdata aren't available."""
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo("Australia/Perth"))
+    except Exception:
+        from datetime import timezone, timedelta
+        return datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=8)))
+
+
 def log(msg: str) -> None:
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ts = _au_now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{ts}] {msg}", flush=True)
 
 
@@ -189,7 +200,7 @@ def split_combined_csv(combined_csv: Path, stamp: str) -> list[dict]:
 # ── Email ────────────────────────────────────────────────
 
 def build_email_body(result: dict, route_stats: list[dict]) -> str:
-    today = datetime.now().strftime("%A, %d %B %Y")
+    today = _au_now().strftime("%A, %d %B %Y")
     lines = [
         f"Flight Scraper Report -- {SCRAPER_NAME} -- {today}",
         "=" * 62, "",
@@ -251,7 +262,7 @@ def send_email(result: dict, route_stats: list[dict]) -> None:
         log("EMAIL_PASSWORD not set -- skipping email.")
         return
 
-    today   = datetime.now().strftime("%Y-%m-%d")
+    today   = _au_now().strftime("%Y-%m-%d")
     status  = "OK" if result["success"] else "FAILED"
     subject = f"Nexus Airlines Scraper -- {today} -- {status}"
     body    = build_email_body(result, route_stats)
@@ -364,7 +375,7 @@ def main():
 
     log("=" * 55)
     log("Nexus Airlines Scraper Cron")
-    log(f"   Date  : {datetime.now().strftime('%A, %d %B %Y %H:%M %Z')}")
+    log(f"   Date  : {_au_now().strftime('%A, %d %B %Y %H:%M %Z')}")
     log(f"   Mode  : {'DRY RUN' if args.dry_run else 'FULL RUN'}")
     log("=" * 55)
     log("")
