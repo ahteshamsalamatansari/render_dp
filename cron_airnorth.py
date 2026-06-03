@@ -70,8 +70,19 @@ ROUTES = [
 
 # ── Helpers ─────────────────────────────────────────────
 
+def _au_now() -> datetime:
+    """Current time in Australian (Perth) timezone — matches the cron TZ env.
+    Falls back to UTC+8 manually if zoneinfo / tzdata aren't available."""
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo("Australia/Perth"))
+    except Exception:
+        from datetime import timezone, timedelta
+        return datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=8)))
+
+
 def log(msg: str) -> None:
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ts = _au_now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{ts}] {msg}", flush=True)
 
 
@@ -195,7 +206,7 @@ def run_route(route: dict) -> dict:
 # ── Email ────────────────────────────────────────────────
 
 def build_email_body(route_results: list[dict], all_files: list[Path]) -> str:
-    today        = datetime.now().strftime("%A, %d %B %Y")
+    today        = _au_now().strftime("%A, %d %B %Y")
     any_failed   = any(not r["success"] for r in route_results)
     overall      = "FAILED (one or more routes)" if any_failed else "Completed"
     lines = [
@@ -238,7 +249,7 @@ def send_email(route_results: list[dict], all_files: list[Path]) -> None:
         log("EMAIL_PASSWORD not set -- skipping email.")
         return
 
-    today       = datetime.now().strftime("%Y-%m-%d")
+    today       = _au_now().strftime("%Y-%m-%d")
     any_failed  = any(not r["success"] for r in route_results)
     status      = "FAILED" if any_failed else "OK"
     subject     = f"Airnorth Scraper -- {today} -- {status}"
@@ -286,7 +297,7 @@ def main():
 
     log("=" * 55)
     log("Airnorth Scraper Cron")
-    log(f"   Date  : {datetime.now().strftime('%A, %d %B %Y %H:%M %Z')}")
+    log(f"   Date  : {_au_now().strftime('%A, %d %B %Y %H:%M %Z')}")
     log(f"   Mode  : {'DRY RUN' if args.dry_run else 'FULL RUN'}")
     log(f"   Routes: {len(ROUTES)}")
     log("=" * 55)
