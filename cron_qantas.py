@@ -51,10 +51,26 @@ ROUTES = [
 
 NO_PRICE_CLASSES = {"No Direct Flight", "NO FLIGHTS", "SOLD OUT", "NO DATA"}
 
+# Subset of NO_PRICE_CLASSES that are LEGITIMATE — the route simply doesn't
+# operate that day. These rows are not a scraper failure and must NOT drag a
+# route's status into FAILED/PARTIAL just by being present.
+LEGIT_EMPTY_CLASSES = {"No Direct Flight"}
+
 # ── Helpers ─────────────────────────────────────────────
 
+def _au_now() -> datetime:
+    """Current time in Australian (Perth) timezone — matches the cron TZ env.
+    Falls back to UTC+8 manually if zoneinfo / tzdata aren't available."""
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo("Australia/Perth"))
+    except Exception:
+        from datetime import timezone, timedelta
+        return datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=8)))
+
+
 def log(msg: str) -> None:
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ts = _au_now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{ts}] {msg}", flush=True)
 
 
@@ -140,9 +156,12 @@ def _is_no_price(fare_price, fare_class: str) -> bool:
 
 
 def analyse_route_xlsx(xlsx_path: Path) -> dict:
-    """Read route xlsx, count total rows and no-price rows."""
+    """Read route xlsx and count: total rows, no-price rows, and how many of
+    those are 'legitimately empty' (e.g. No Direct Flight that day)."""
+    empty = {"total": 0, "no_price": 0, "legit_empty": 0,
+             "unexpected_no_price": 0, "all_unexpected_no_price": True}
     if not xlsx_path or not xlsx_path.exists():
-        return {"total": 0, "no_price": 0, "all_no_price": True}
+        return empty
     try:
         from openpyxl import load_workbook
         wb  = load_workbook(xlsx_path, read_only=True, data_only=True)
@@ -154,30 +173,43 @@ def analyse_route_xlsx(xlsx_path: Path) -> dict:
             class_col = headers.index("Fare Class")
         except ValueError:
             wb.close()
-            return {"total": 0, "no_price": 0, "all_no_price": True}
+            return empty
 
-        total    = 0
-        no_price = 0
+        total       = 0
+        no_price    = 0
+        legit_empty = 0
         for row in rows_iter:
             total += 1
             fp = row[price_col] if price_col < len(row) else None
             fc = str(row[class_col]) if class_col < len(row) and row[class_col] else ""
             if _is_no_price(fp, fc):
                 no_price += 1
+                if fc in LEGIT_EMPTY_CLASSES:
+                    legit_empty += 1
 
         wb.close()
+        unexpected = no_price - legit_empty
         return {
-            "total":        total,
-            "no_price":     no_price,
-            "all_no_price": total == 0 or no_price == total,
+            "total":                   total,
+            "no_price":                no_price,
+            "legit_empty":             legit_empty,
+            "unexpected_no_price":     unexpected,
+            # True when there's no priced row AND no legit-empty row either —
+            # i.e. the route truly produced nothing useful.
+            "all_unexpected_no_price": total == 0 or (unexpected == total and legit_empty == 0),
         }
     except Exception as e:
         log(f"  Could not read {xlsx_path.name}: {e}")
-        return {"total": 0, "no_price": 0, "all_no_price": True}
+        return empty
 
 
 def build_route_stats() -> list[dict]:
-    """Match each route to its output files and compute price coverage stats."""
+    """Match each route to its output files and compute price coverage stats.
+
+    A row tagged 'No Direct Flight' (LEGIT_EMPTY_CLASSES) is the schedule
+    reporting that the route doesn't run that day — it is NOT a scraper
+    failure, so it does not push a route into PARTIAL/FAILED.
+    """
     stats = []
     for r in ROUTES:
         orig, dest = r["orig"], r["dest"]
@@ -185,28 +217,38 @@ def build_route_stats() -> list[dict]:
         csv_file   = find_route_file(orig, dest, "csv")
         fs         = analyse_route_xlsx(xlsx)
 
-        price_ok = fs["total"] - fs["no_price"]
-        pct      = (price_ok / fs["total"] * 100) if fs["total"] else 0
+        price_ok       = fs["total"] - fs["no_price"]
+        legit_empty    = fs.get("legit_empty", 0)
+        unexpected     = fs.get("unexpected_no_price", fs["no_price"])
+        usable         = price_ok + legit_empty            # priced + legitimately-no-flight
+        pct            = (price_ok / fs["total"] * 100) if fs["total"] else 0
+        usable_pct     = (usable / fs["total"] * 100) if fs["total"] else 0
+
         r_status = (
             "FAILED - No File" if not xlsx else
-            "FAILED - No Data" if fs["all_no_price"] else
-            "PARTIAL"          if fs["no_price"] > 0 else
+            "FAILED - No Data" if fs.get("all_unexpected_no_price", fs.get("all_no_price")) else
+            "PARTIAL"          if unexpected > 0 else
             "OK"
         )
         log(
             f"   {route_label(orig, dest)}: {fs['total']} rows, "
-            f"{price_ok} with price ({pct:.0f}%), {fs['no_price']} no price  [{r_status}]"
+            f"{price_ok} priced ({pct:.0f}%), {legit_empty} no-direct-flight, "
+            f"{unexpected} unexpected no-price  [{r_status}]"
         )
         stats.append({
-            "orig":          orig,
-            "dest":          dest,
-            "label":         route_label(orig, dest),
-            "xlsx":          xlsx,
-            "csv":           csv_file if csv_file and csv_file.exists() else None,
-            "total_rows":    fs["total"],
-            "no_price_rows": fs["no_price"],
-            "all_no_price":  fs["all_no_price"],
-            "status":        r_status,
+            "orig":                orig,
+            "dest":                dest,
+            "label":               route_label(orig, dest),
+            "xlsx":                xlsx,
+            "csv":                 csv_file if csv_file and csv_file.exists() else None,
+            "total_rows":          fs["total"],
+            "no_price_rows":       fs["no_price"],
+            "legit_empty_rows":    legit_empty,
+            "unexpected_no_price": unexpected,
+            "usable_rows":         usable,
+            "usable_pct":          usable_pct,
+            "all_no_price":        fs.get("all_unexpected_no_price", fs.get("all_no_price")),
+            "status":              r_status,
         })
     return stats
 
@@ -214,7 +256,7 @@ def build_route_stats() -> list[dict]:
 # ── Email ────────────────────────────────────────────────
 
 def build_email_body(scraper_success: bool, duration: str, route_stats: list[dict]) -> str:
-    today   = datetime.now().strftime("%A, %d %B %Y")
+    today   = _au_now().strftime("%A, %d %B %Y")
     any_bad = any(s["status"] != "OK" for s in route_stats)
     overall = "FAILED" if (not scraper_success or any_bad) else "Completed"
     lines = [
@@ -230,14 +272,17 @@ def build_email_body(scraper_success: bool, duration: str, route_stats: list[dic
     ]
 
     for s in route_stats:
-        price_ok = s["total_rows"] - s["no_price_rows"]
-        pct      = (price_ok / s["total_rows"] * 100) if s["total_rows"] else 0
+        price_ok    = s["total_rows"] - s["no_price_rows"]
+        pct         = (price_ok / s["total_rows"] * 100) if s["total_rows"] else 0
+        legit_empty = s.get("legit_empty_rows", 0)
+        unexpected  = s.get("unexpected_no_price", s["no_price_rows"])
         lines += [
             f"  [{s['status']}] {s['label']}",
-            f"       File        : {s['xlsx'].name if s['xlsx'] else 'NOT FOUND'}",
-            f"       Total rows  : {s['total_rows']}",
-            f"       With price  : {price_ok}  ({pct:.0f}%)",
-            f"       No price    : {s['no_price_rows']}",
+            f"       File             : {s['xlsx'].name if s['xlsx'] else 'NOT FOUND'}",
+            f"       Total rows       : {s['total_rows']}",
+            f"       With price       : {price_ok}  ({pct:.0f}%)",
+            f"       No direct flight : {legit_empty}  (not a failure -- route doesn't run those days)",
+            f"       Unexpected no-px : {unexpected}",
             "",
         ]
 
@@ -267,7 +312,7 @@ def send_email(scraper_success: bool, duration: str, route_stats: list[dict]) ->
         return
 
     any_bad = any(s["status"] != "OK" for s in route_stats)
-    today   = datetime.now().strftime("%Y-%m-%d")
+    today   = _au_now().strftime("%Y-%m-%d")
     status  = "FAILED" if (not scraper_success or any_bad) else "OK"
     subject = f"Qantas Scraper -- {today} -- {status}"
     body    = build_email_body(scraper_success, duration, route_stats)
@@ -358,7 +403,7 @@ def main():
 
     log("=" * 55)
     log("Qantas Scraper Cron")
-    log(f"   Date  : {datetime.now().strftime('%A, %d %B %Y %H:%M %Z')}")
+    log(f"   Date  : {_au_now().strftime('%A, %d %B %Y %H:%M %Z')}")
     log(f"   Mode  : {'DRY RUN' if args.dry_run else 'FULL RUN'}")
     log("=" * 55)
     log("")
